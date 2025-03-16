@@ -702,6 +702,7 @@ export class ChannelStartupService {
             ) as "updatedAt",
             "Chat"."createdAt" as "windowStart",
             "Chat"."createdAt" + INTERVAL '24 hours' as "windowExpires",
+            "Chat"."labels" as "labels",
             CASE 
               WHEN "Chat"."createdAt" + INTERVAL '24 hours' > NOW() THEN true 
               ELSE false 
@@ -739,19 +740,19 @@ export class ChannelStartupService {
       const mappedResults = results.map((contact) => {
         const lastMessage = contact.lastMessageId
           ? {
-              id: contact.lastMessageId,
-              key: contact.lastMessageKey,
-              pushName: contact.lastMessagePushName,
-              participant: contact.lastMessageParticipant,
-              messageType: contact.lastMessageMessageType,
-              message: contact.lastMessageMessage,
-              contextInfo: contact.lastMessageContextInfo,
-              source: contact.lastMessageSource,
-              messageTimestamp: contact.lastMessageMessageTimestamp,
-              instanceId: contact.lastMessageInstanceId,
-              sessionId: contact.lastMessageSessionId,
-              status: contact.lastMessageStatus,
-            }
+            id: contact.lastMessageId,
+            key: contact.lastMessageKey,
+            pushName: contact.lastMessagePushName,
+            participant: contact.lastMessageParticipant,
+            messageType: contact.lastMessageMessageType,
+            message: contact.lastMessageMessage,
+            contextInfo: contact.lastMessageContextInfo,
+            source: contact.lastMessageSource,
+            messageTimestamp: contact.lastMessageMessageTimestamp,
+            instanceId: contact.lastMessageInstanceId,
+            sessionId: contact.lastMessageSessionId,
+            status: contact.lastMessageStatus,
+          }
           : undefined;
 
         return {
@@ -764,6 +765,7 @@ export class ChannelStartupService {
           windowExpires: contact.windowExpires,
           windowActive: contact.windowActive,
           lastMessage: lastMessage ? this.cleanMessageData(lastMessage) : undefined,
+          labels: contact.labels,
         };
       });
 
