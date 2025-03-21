@@ -19,7 +19,6 @@ proxy:
 
 # Credentials for your image host.
 registry:
-  server: <%= ENV["REGISTRY_SERVER"] %>
   username: <%= ENV["REGISTRY_USERNAME"] %>
   password:
     - REGISTRY_PASSWORD
