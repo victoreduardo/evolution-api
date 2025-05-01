@@ -2,6 +2,8 @@ import dayjs from 'dayjs';
 import fs from 'fs';
 
 import { configService, Log } from './env.config';
+import { logtail } from '../utils/instrumentLogTail';
+
 const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
 
 const formatDateLog = (timestamp: number) =>
@@ -120,6 +122,22 @@ export class Logger {
           `[${typeValue}]`,
           value,
         );
+      }
+
+      // Send logs to LogTail if it's configured
+      if (logtail) {
+        const logData = {
+          level: type.toLowerCase(),
+          context: this.context,
+          instance: this.instance,
+          pid: process.pid,
+          timestamp: Date.now(),
+          value: value,
+          valueType: typeValue
+        };
+        
+        logtail.info(value, logData);
+        logtail.flush();
       }
     }
   }

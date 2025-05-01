@@ -1,5 +1,7 @@
 // Import this first from sentry instrument!
 import '@utils/instrumentSentry';
+// Import LogTail instrument
+import '@utils/instrumentLogTail';
 
 // Now import other modules
 import { ProviderFiles } from '@api/provider/sessions';
