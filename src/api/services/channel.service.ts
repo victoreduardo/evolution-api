@@ -237,6 +237,7 @@ export class ChannelStartupService {
     this.localChatwoot.token = data?.token;
     this.localChatwoot.url = data?.url;
     this.localChatwoot.nameInbox = data?.nameInbox;
+    this.localChatwoot.idInbox = data?.idInbox;
     this.localChatwoot.signMsg = data?.signMsg;
     this.localChatwoot.signDelimiter = data?.signDelimiter;
     this.localChatwoot.number = data?.number;
@@ -270,6 +271,7 @@ export class ChannelStartupService {
           token: data.token,
           url: data.url,
           nameInbox: data.nameInbox,
+          idInbox: data.idInbox,
           signMsg: data.signMsg,
           signDelimiter: data.signMsg ? data.signDelimiter : null,
           number: data.number,
@@ -298,6 +300,7 @@ export class ChannelStartupService {
         token: data.token,
         url: data.url,
         nameInbox: data.nameInbox,
+        idInbox: data.idInbox,
         signMsg: data.signMsg,
         number: data.number,
         reopenConversation: data.reopenConversation,
