@@ -219,6 +219,16 @@ export class ChatwootService {
     }
     this.logger.log(`Inbox created - inboxId: ${inboxId}`);
 
+    // Update the database with the idInbox
+    await this.prismaRepository.chatwoot.update({
+      where: {
+        instanceId: instance.instanceId,
+      },
+      data: {
+        idInbox: inboxId,
+      },
+    });
+
     if (!this.configService.get<Chatwoot>('CHATWOOT').BOT_CONTACT) {
       this.logger.log('Chatwoot bot contact is disabled');
 
@@ -779,7 +789,17 @@ export class ChatwootService {
     }
 
     const cwConfig = this.getClientCwConfig();
-    const findByName = inbox.payload.find((inbox) => inbox.name === cwConfig.nameInbox || inbox.id === cwConfig.idInbox);
+    
+    // First try to find by idInbox if it exists, otherwise fall back to nameInbox
+    let findByName = null;
+    if (cwConfig.idInbox) {
+      findByName = inbox.payload.find((inbox) => inbox.id === cwConfig.idInbox);
+    }
+    
+    // If not found by idInbox or idInbox is undefined, try by nameInbox
+    if (!findByName && cwConfig.nameInbox) {
+      findByName = inbox.payload.find((inbox) => inbox.name === cwConfig.nameInbox);
+    }
 
     if (!findByName) {
       this.logger.warn(`Inbox (${cwConfig.nameInbox} | ${cwConfig.idInbox}) not found: ${JSON.stringify(inbox)}`);
