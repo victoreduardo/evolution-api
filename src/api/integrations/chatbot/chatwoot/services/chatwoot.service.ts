@@ -91,13 +91,14 @@ export class ChatwootService {
     return client;
   }
 
-  public getClientCwConfig(): ChatwootAPIConfig & { nameInbox: string; mergeBrazilContacts: boolean } {
+  public getClientCwConfig(): ChatwootAPIConfig & { nameInbox: string; idInbox: number; mergeBrazilContacts: boolean } {
     return {
       basePath: this.provider.url,
       with_credentials: true,
       credentials: 'include',
       token: this.provider.token,
       nameInbox: this.provider.nameInbox,
+      idInbox: this.provider.idInbox,
       mergeBrazilContacts: this.provider.mergeBrazilContacts,
     };
   }
@@ -777,10 +778,11 @@ export class ChatwootService {
       return null;
     }
 
-    const findByName = inbox.payload.find((inbox) => inbox.name === this.getClientCwConfig().nameInbox);
+    const cwConfig = this.getClientCwConfig();
+    const findByName = inbox.payload.find((inbox) => inbox.name === cwConfig.nameInbox || inbox.id === cwConfig.idInbox);
 
     if (!findByName) {
-      this.logger.warn(`Inbox (${this.getClientCwConfig().nameInbox}) not found: ${JSON.stringify(inbox)}`);
+      this.logger.warn(`Inbox (${cwConfig.nameInbox} | ${cwConfig.idInbox}) not found: ${JSON.stringify(inbox)}`);
       return null;
     }
 
