@@ -595,7 +595,7 @@ export class ChatwootService {
       const filterInbox = await this.getInbox(instance);
 
       if (!filterInbox) {
-        this.logger.warn(`Inbox not found for instance: ${JSON.stringify(instance)}`);
+        this.logger.warn(`Inbox not found for instance: ${JSON.stringify(instance)} | Inbox: ${JSON.stringify(filterInbox)}`);
         return null;
       }
 
@@ -756,7 +756,9 @@ export class ChatwootService {
   public async getInbox(instance: InstanceDto): Promise<inbox | null> {
     const cacheKey = `${instance.instanceName}:getInbox`;
     if (await this.cache.has(cacheKey)) {
-      return (await this.cache.get(cacheKey)) as inbox;
+      const inbox = (await this.cache.get(cacheKey)) as inbox;
+      this.logger.verbose(`Cache (${cacheKey}) hit for getInbox: ${JSON.stringify(inbox)}`);
+      return inbox;
     }
 
     const client = await this.clientCw(instance);
@@ -771,7 +773,7 @@ export class ChatwootService {
     })) as any;
 
     if (!inbox) {
-      this.logger.warn('inbox not found');
+      this.logger.warn(`Inbox not found: ${JSON.stringify(inbox)}`);
       return null;
     }
 
