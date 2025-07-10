@@ -121,6 +121,7 @@ CREATE TABLE `Chatwoot` (
     `token` VARCHAR(100) NULL,
     `url` VARCHAR(500) NULL,
     `nameInbox` VARCHAR(100) NULL,
+    `idInbox` INTEGER NULL,
     `signMsg` BOOLEAN NULL DEFAULT false,
     `signDelimiter` VARCHAR(100) NULL,
     `number` VARCHAR(100) NULL,

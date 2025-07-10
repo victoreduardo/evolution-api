@@ -66,6 +66,7 @@ export declare namespace wa {
     token?: string;
     url?: string;
     nameInbox?: string;
+    idInbox?: number;
     signMsg?: boolean;
     signDelimiter?: string;
     number?: string;

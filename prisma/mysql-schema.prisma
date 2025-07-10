@@ -211,6 +211,7 @@ model Chatwoot {
   token                   String?   @db.VarChar(100)
   url                     String?   @db.VarChar(500)
   nameInbox               String?   @db.VarChar(100)
+  idInbox                 Int?      @db.Int
   signMsg                 Boolean?  @default(false)
   signDelimiter           String?   @db.VarChar(100)
   number                  String?   @db.VarChar(100)

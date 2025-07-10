@@ -31,6 +31,7 @@ export const chatwootSchema: JSONSchema7 = {
     signMsg: { type: 'boolean', enum: [true, false] },
     signDelimiter: { type: ['string', 'null'] },
     nameInbox: { type: ['string', 'null'] },
+    idInbox: { type: ['number', 'null'] },
     reopenConversation: { type: 'boolean', enum: [true, false] },
     conversationPending: { type: 'boolean', enum: [true, false] },
     autoCreate: { type: 'boolean', enum: [true, false] },
