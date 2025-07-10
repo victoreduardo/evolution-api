@@ -780,7 +780,7 @@ export class ChatwootService {
     const findByName = inbox.payload.find((inbox) => inbox.name === this.getClientCwConfig().nameInbox);
 
     if (!findByName) {
-      this.logger.warn('inbox not found');
+      this.logger.warn(`Inbox (${this.getClientCwConfig().nameInbox}) not found: ${JSON.stringify(inbox)}`);
       return null;
     }
 
