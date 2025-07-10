@@ -341,6 +341,7 @@ export class ChannelStartupService {
       token: data.token,
       url: data.url,
       nameInbox: data.nameInbox,
+      idInbox: data.idInbox,
       signMsg: data.signMsg,
       signDelimiter: data.signDelimiter || null,
       reopenConversation: data.reopenConversation,
