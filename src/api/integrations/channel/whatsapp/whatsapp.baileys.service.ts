@@ -79,6 +79,7 @@ import { Boom } from '@hapi/boom';
 import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance } from '@prisma/client';
 import { createJid } from '@utils/createJid';
+import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent } from '@utils/makeProxyAgent';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { status } from '@utils/renderStatus';
@@ -581,17 +582,18 @@ export class BaileysStartupService extends ChannelStartupService {
       this.logger.info(`Browser: ${browser}`);
     }
 
-    let version;
-    let log;
+    const baileysVersion = await fetchLatestWaWebVersion({});
+    const version = baileysVersion.version;
+    const log = `Baileys version: ${version.join('.')}`;
 
-    if (session.VERSION) {
-      version = session.VERSION.split('.');
-      log = `Baileys version env: ${version}`;
-    } else {
-      const baileysVersion = await fetchLatestBaileysVersion();
-      version = baileysVersion.version;
-      log = `Baileys version: ${version}`;
-    }
+    // if (session.VERSION) {
+    //   version = session.VERSION.split('.');
+    //   log = `Baileys version env: ${version}`;
+    // } else {
+    //   const baileysVersion = await fetchLatestWaWebVersion({});
+    //   version = baileysVersion.version;
+    //   log = `Baileys version: ${version}`;
+    // }
 
     this.logger.info(log);
 
