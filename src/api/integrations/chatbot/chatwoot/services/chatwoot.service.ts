@@ -2338,7 +2338,7 @@ export class ChatwootService {
             const url =
               `/public/api/v1/inboxes/${inbox.inbox_identifier}/contacts/${sourceId}` +
               `/conversations/${conversationId}/update_last_seen`;
-            chatwootRequest(this.getClientCwConfig(), {
+            await chatwootRequest(this.getClientCwConfig(), {
               method: 'POST',
               url: url,
             });
