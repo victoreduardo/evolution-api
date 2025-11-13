@@ -1,0 +1,75 @@
+<% require "dotenv"; Dotenv.load(".env.deploy") %>
+service: evolution
+
+# Name of the container image.
+image: <%= ENV["IMAGE_NAME"] %>
+
+# Deploy to these servers.
+servers:
+  web:
+    - <%= ENV["WEB_SERVER_IP"] %>
+
+proxy: 
+  ssl: true
+  forward_headers: true
+  host: <%= ENV["WEB_SERVER_URL"] %>
+  app_port: 8080
+  healthcheck:
+    path: /
+
+# Credentials for your image host.
+registry:
+  server: <%= ENV["REGISTRY_SERVER"] %>
+  username: <%= ENV["REGISTRY_USERNAME"] %>
+  password:
+    - REGISTRY_PASSWORD
+
+# Configure builder setup.
+builder:
+  arch: amd64
+
+aliases:
+  console: app exec --interactive --reuse "bin/rails console"
+  shell: app exec --interactive --reuse "sh"
+  logs: app logs -f
+  logs-sidekiq: app logs -f --container=sidekiq
+  dbc: app exec --interactive --reuse "bin/rails dbconsole"
+
+env:
+  clear:
+    SERVER_URL: https://<%= ENV["WEB_SERVER_URL"] %>
+
+    AUTHENTICATION_TYPE: apikey
+    AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: true
+    AUTHENTICATION_API_KEY: <%= ENV["AUTHENTICATION_API_KEY"] %>
+    
+    #LOGTAIL_TOKEN: <%= ENV["LOGTAIL_TOKEN"] %>
+    #LOGTAIL_ENDPOINT: <%= ENV["LOGTAIL_ENDPOINT"] %>
+
+    LANGUAGE: pt-BR
+
+    DATABASE_ENABLED: true
+    DATABASE_PROVIDER: <%= ENV["DATABASE_PROVIDER"] %>
+    DATABASE_CONNECTION_URI: <%= ENV["DATABASE_CONNECTION_URI"] %>
+    DATABASE_CONNECTION_CLIENT_NAME: evolution
+    DATABASE_SAVE_DATA_INSTANCE: true
+    DATABASE_SAVE_DATA_NEW_MESSAGE: true
+    DATABASE_SAVE_MESSAGE_UPDATE: true
+    DATABASE_SAVE_DATA_CONTACTS: true
+    DATABASE_SAVE_DATA_CHATS: true
+    DATABASE_SAVE_DATA_LABELS: true
+    DATABASE_SAVE_DATA_HISTORIC: true
+
+    OPENAI_ENABLED: false
+    DIFY_ENABLED: false
+    CHATWOOT_ENABLED: true
+    DEL_INSTANCE: false
+    CONFIG_SESSION_PHONE_VERSION: <%= ENV["CONFIG_SESSION_PHONE_VERSION"] %>
+
+    TYPEBOT_ENABLED: true
+    TYPEBOT_API_VERSION: latest
+
+    CACHE_REDIS_ENABLED: true
+    CACHE_REDIS_URI: <%= ENV["REDIS_URL"] %>/2
+    CACHE_REDIS_PREFIX_KEY: evolution
+    CACHE_REDIS_SAVE_INSTANCES: false
