@@ -6,7 +6,15 @@ import { ProviderFiles } from '@api/provider/sessions';
 import { PrismaRepository } from '@api/repository/repository.service';
 import { HttpStatus, router } from '@api/routes/index.router';
 import { eventManager, waMonitor } from '@api/server.module';
-import { Auth, configService, Cors, HttpServer, ProviderSession, Webhook } from '@config/env.config';
+import {
+  Auth,
+  configService,
+  Cors,
+  HttpServer,
+  ProviderSession,
+  Sentry as SentryConfig,
+  Webhook,
+} from '@config/env.config';
 import { onUnexpectedError } from '@config/error.config';
 import { Logger } from '@config/logger.config';
 import { ROOT_DIR } from '@config/path.config';
@@ -128,11 +136,20 @@ async function bootstrap() {
   const httpServer = configService.get<HttpServer>('SERVER');
 
   ServerUP.app = app;
-  const server = ServerUP[httpServer.TYPE];
+  let server = ServerUP[httpServer.TYPE];
+
+  if (server === null) {
+    logger.warn('SSL cert load failed — falling back to HTTP.');
+    logger.info("Ensure 'SSL_CONF_PRIVKEY' and 'SSL_CONF_FULLCHAIN' env vars point to valid certificate files.");
+
+    httpServer.TYPE = 'http';
+    server = ServerUP[httpServer.TYPE];
+  }
 
   eventManager.init(server);
 
-  if (process.env.SENTRY_DSN) {
+  const sentryConfig = configService.get<SentryConfig>('SENTRY');
+  if (sentryConfig.DSN) {
     logger.info('Sentry - ON');
 
     // Add this after all routes,

@@ -7,7 +7,7 @@ import { CacheConf, Chatwoot, ConfigService, Database, DelInstance, ProviderSess
 import { Logger } from '@config/logger.config';
 import { INSTANCE_DIR, STORE_DIR } from '@config/path.config';
 import { NotFoundException } from '@exceptions';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import EventEmitter2 from 'eventemitter2';
 import { rmSync } from 'fs';
 import { join } from 'path';
@@ -29,6 +29,8 @@ export class WAMonitoringService {
 
     Object.assign(this.db, configService.get<Database>('DATABASE'));
     Object.assign(this.redis, configService.get<CacheConf>('CACHE'));
+
+    (this as any).providerSession = Object.freeze(configService.get<ProviderSession>('PROVIDER'));
   }
 
   private readonly db: Partial<Database> = {};
@@ -37,7 +39,7 @@ export class WAMonitoringService {
   private readonly logger = new Logger('WAMonitoringService');
   public readonly waInstances: Record<string, any> = {};
 
-  private readonly providerSession = Object.freeze(this.configService.get<ProviderSession>('PROVIDER'));
+  private readonly providerSession: ProviderSession;
 
   public delInstanceTime(instance: string) {
     const time = this.configService.get<DelInstance>('DEL_INSTANCE');
@@ -91,6 +93,7 @@ export class WAMonitoringService {
         Chatwoot: true,
         Proxy: true,
         Rabbitmq: true,
+        Nats: true,
         Sqs: true,
         Websocket: true,
         Setting: true,
@@ -168,7 +171,8 @@ export class WAMonitoringService {
 
   public async cleaningStoreData(instanceName: string) {
     if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED) {
-      execSync(`rm -rf ${join(STORE_DIR, 'chatwoot', instanceName + '*')}`);
+      const instancePath = join(STORE_DIR, 'chatwoot', instanceName);
+      execFileSync('rm', ['-rf', instancePath]);
     }
 
     const instance = await this.prismaRepository.instance.findFirst({
@@ -190,6 +194,7 @@ export class WAMonitoringService {
     await this.prismaRepository.chatwoot.deleteMany({ where: { instanceId: instance.id } });
     await this.prismaRepository.proxy.deleteMany({ where: { instanceId: instance.id } });
     await this.prismaRepository.rabbitmq.deleteMany({ where: { instanceId: instance.id } });
+    await this.prismaRepository.nats.deleteMany({ where: { instanceId: instance.id } });
     await this.prismaRepository.sqs.deleteMany({ where: { instanceId: instance.id } });
     await this.prismaRepository.integrationSession.deleteMany({ where: { instanceId: instance.id } });
     await this.prismaRepository.typebot.deleteMany({ where: { instanceId: instance.id } });
