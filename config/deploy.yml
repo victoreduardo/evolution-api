@@ -9,7 +9,7 @@ servers:
   web:
     - <%= ENV["WEB_SERVER_IP"] %>
 
-proxy: 
+proxy:
   ssl: true
   forward_headers: true
   host: <%= ENV["WEB_SERVER_URL"] %>
@@ -73,3 +73,30 @@ env:
     CACHE_REDIS_URI: <%= ENV["REDIS_URL"] %>/2
     CACHE_REDIS_PREFIX_KEY: evolution
     CACHE_REDIS_SAVE_INSTANCES: false
+
+    PROMETHEUS_METRICS: true
+    METRICS_AUTH_REQUIRED: true
+    METRICS_USER: evo-prometheus-metrics
+    METRICS_PASSWORD: "6DTLtBqBU_PTfVPsB9t6F-v7NCN.hquu88G_H_AnsfMnX9ZTqZ"
+    METRICS_ALLOWED_IPS: 162.120.186.81,170.239.226.191,135.181.254.204,178.156.162.120
+
+accessories:
+  node-exporter:
+    host: <%= ENV["WEB_SERVER_IP"] %>
+    image: prom/node-exporter:latest
+    files:
+      - observability/node_exporter/config.yml:/root/node_exporter/config.yml
+    directories:
+      - /root/evolution-node-exporter/root/node_exporter:/etc/node_exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    cmd: "--path.procfs=/host/proc --path.rootfs=/rootfs --path.sysfs=/host/sys --web.config.file=/etc/node_exporter/config.yml"
+    port: 9100
+    proxy:
+      ssl: true
+      host: <%= ENV["METRICS_SERVER_URL"] %>
+      app_port: 9100
+      healthcheck:
+        path: /metrics
