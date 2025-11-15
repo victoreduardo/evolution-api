@@ -17,6 +17,13 @@ proxy:
   healthcheck:
     path: /
 
+logging:
+  driver: loki
+  options:
+    loki-url: https://<%= ENV["LOKI_USERNAME"] %>:<%= ENV["LOKI_PASSWORD"] %>@<%= ENV["LOKI_HOST"] %>/loki/api/v1/push
+    loki-batch-size: "400"
+    loki-external-labels: "job=evolution,service=evolution,environment=production"
+
 # Credentials for your image host.
 registry:
   server: <%= ENV["REGISTRY_SERVER"] %>
