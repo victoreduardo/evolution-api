@@ -1667,10 +1667,7 @@ export class ChatwootService {
   }
 
   private isInteractiveButtonMessage(messageType: string, message: any) {
-    return (
-      messageType === 'interactiveMessage' &&
-      message.interactiveMessage?.nativeFlowMessage?.buttons?.length > 0
-    );
+    return messageType === 'interactiveMessage' && message.interactiveMessage?.nativeFlowMessage?.buttons?.length > 0;
   }
 
   private getAdsMessage(msg: any) {
