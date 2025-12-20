@@ -48,10 +48,15 @@ const packageJson = JSON.parse(fs.readFileSync('./package.json', 'utf8'));
 const metricsIPWhitelist = (req: Request, res: Response, next: NextFunction) => {
   const metricsConfig = configService.get('METRICS');
   const allowedIPs = metricsConfig.ALLOWED_IPS?.split(',').map((ip) => ip.trim()) || ['127.0.0.1'];
-  const clientIPs = [req.ip, req.connection.remoteAddress, req.socket.remoteAddress, req.headers['x-forwarded-for']].filter((ip) => ip !== undefined);
+  const clientIPs = [
+    req.ip,
+    req.connection.remoteAddress,
+    req.socket.remoteAddress,
+    req.headers['x-forwarded-for'],
+  ].filter((ip) => ip !== undefined);
 
-  if (allowedIPs.filter(ip => clientIPs.includes(ip)) === 0) {
-    return res.status(403).send(`Forbidden: IP not allowed: ${clientIPs}`);
+  if (allowedIPs.filter((ip) => clientIPs.includes(ip)) === 0) {
+    return res.status(403).send('Forbidden: IP not allowed');
   }
 
   next();
