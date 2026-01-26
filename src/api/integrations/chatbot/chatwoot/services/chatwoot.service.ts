@@ -728,10 +728,13 @@ export class ChatwootService {
         const filterInbox = await this.getInbox(instance);
         if (!filterInbox) return null;
 
+        let groupParticipants: any[] = [];
+
         if (isGroup) {
           this.logger.verbose(`Processing group conversation`);
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
           this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
+          groupParticipants = group.participants || [];
 
           const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
           nameContact = group.subject;
@@ -854,6 +857,14 @@ export class ChatwootService {
           if (inboxConversation) {
             this.logger.verbose(`Returning existing conversation ID: ${inboxConversation.id}`);
             this.cache.set(cacheKey, inboxConversation.id, 1800);
+
+            // Sync group participants in background
+            if (isGroup && groupParticipants.length > 0) {
+              this.syncGroupParticipants(instance, inboxConversation.id, filterInbox.id, groupParticipants).catch((err) =>
+                this.logger.error(`Error syncing group participants: ${err}`),
+              );
+            }
+
             return inboxConversation.id;
           }
         }
@@ -886,6 +897,14 @@ export class ChatwootService {
 
         this.logger.verbose(`New conversation created of ${remoteJid} with ID: ${conversation.id}`);
         this.cache.set(cacheKey, conversation.id, 1800);
+
+        // Sync group participants in background
+        if (isGroup && groupParticipants.length > 0) {
+          this.syncGroupParticipants(instance, conversation.id, filterInbox.id, groupParticipants).catch((err) =>
+            this.logger.error(`Error syncing group participants: ${err}`),
+          );
+        }
+
         return conversation.id;
       } finally {
         await this.cache.delete(lockKey);
@@ -987,6 +1006,156 @@ export class ChatwootService {
     } catch (error) {
       this.logger.error(`Error finding group conversation by source_id: ${error}`);
       return null;
+    }
+  }
+
+  public async getGroupContacts(instance: InstanceDto, conversationId: number): Promise<any[] | null> {
+    try {
+      const client = await this.clientCw(instance);
+      if (!client) {
+        this.logger.warn('client not found');
+        return null;
+      }
+
+      const response = await chatwootRequest(this.getClientCwConfig(), {
+        method: 'GET',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/group_contacts`,
+      });
+
+      if (response && Array.isArray(response)) {
+        return response;
+      }
+
+      return [];
+    } catch (error) {
+      this.logger.error(`Error getting group contacts: ${error}`);
+      return null;
+    }
+  }
+
+  public async addGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<any[] | null> {
+    try {
+      const client = await this.clientCw(instance);
+      if (!client) {
+        this.logger.warn('client not found');
+        return null;
+      }
+
+      const response = await chatwootRequest(this.getClientCwConfig(), {
+        method: 'POST',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/group_contacts`,
+        body: { contact_ids: contactIds },
+      });
+
+      this.logger.verbose(`Added ${contactIds.length} contacts to group conversation ${conversationId}`);
+      return response as any[];
+    } catch (error) {
+      this.logger.error(`Error adding group contacts: ${error}`);
+      return null;
+    }
+  }
+
+  public async updateGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<any[] | null> {
+    try {
+      const client = await this.clientCw(instance);
+      if (!client) {
+        this.logger.warn('client not found');
+        return null;
+      }
+
+      const response = await chatwootRequest(this.getClientCwConfig(), {
+        method: 'PUT',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/group_contacts`,
+        body: { contact_ids: contactIds },
+      });
+
+      this.logger.verbose(`Updated group contacts for conversation ${conversationId} with ${contactIds.length} contacts`);
+      return response as any[];
+    } catch (error) {
+      this.logger.error(`Error updating group contacts: ${error}`);
+      return null;
+    }
+  }
+
+  public async removeGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<boolean> {
+    try {
+      const client = await this.clientCw(instance);
+      if (!client) {
+        this.logger.warn('client not found');
+        return false;
+      }
+
+      await chatwootRequest(this.getClientCwConfig(), {
+        method: 'DELETE',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/group_contacts`,
+        body: { contact_ids: contactIds },
+      });
+
+      this.logger.verbose(`Removed ${contactIds.length} contacts from group conversation ${conversationId}`);
+      return true;
+    } catch (error) {
+      this.logger.error(`Error removing group contacts: ${error}`);
+      return false;
+    }
+  }
+
+  public async syncGroupParticipants(
+    instance: InstanceDto,
+    conversationId: number,
+    inboxId: number,
+    participants: any[],
+  ): Promise<void> {
+    try {
+      const cacheKey = `${instance.instanceName}:syncGroupParticipants-${conversationId}`;
+      const lastSyncTime = await this.cache.get(cacheKey);
+
+      // Only sync every 5 minutes to avoid excessive API calls
+      if (lastSyncTime) {
+        this.logger.verbose(`Skipping group participants sync - synced recently`);
+        return;
+      }
+
+      this.logger.verbose(`Syncing ${participants.length} participants for conversation ${conversationId}`);
+
+      const contactIds: number[] = [];
+
+      for (const participant of participants) {
+        const participantPhone = participant.id?.split('@')[0]?.split(':')[0];
+        if (!participantPhone) continue;
+
+        let contact = await this.findContact(instance, participantPhone);
+
+        if (!contact) {
+          // Create the contact if it doesn't exist
+          const contactResult = await this.createContact(
+            instance,
+            participantPhone,
+            inboxId,
+            false,
+            participant.name || participantPhone,
+            null,
+            participant.id,
+          );
+
+          if (contactResult) {
+            contact = contactResult.payload?.contact || contactResult.payload || contactResult;
+          }
+        }
+
+        if (contact?.id) {
+          contactIds.push(contact.id);
+        }
+      }
+
+      if (contactIds.length > 0) {
+        await this.updateGroupContacts(instance, conversationId, contactIds);
+        this.logger.verbose(`Synced ${contactIds.length} contacts for group conversation ${conversationId}`);
+      }
+
+      // Cache sync time for 5 minutes
+      this.cache.set(cacheKey, Date.now(), 300);
+    } catch (error) {
+      this.logger.error(`Error syncing group participants: ${error}`);
     }
   }
 
