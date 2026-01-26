@@ -1,8 +1,9 @@
 services:
   api:
     container_name: evolution_api
-    image: evolution/api:local
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: always
     ports:
       - 8080:8080
@@ -25,8 +26,24 @@ services:
     networks:
       - evolution-net
 
+  redis:
+    container_name: evolution_redis
+    image: redis:latest
+    restart: always
+    command: >
+      redis-server --port 6379 --appendonly yes
+    volumes:
+      - evolution_redis:/data
+    networks:
+      evolution-net:
+        aliases:
+          - evolution-redis
+    expose:
+      - "6379"
+
 volumes:
   evolution_instances:
+  evolution_redis:
 
 
 networks:
