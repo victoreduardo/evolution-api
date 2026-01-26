@@ -1159,6 +1159,50 @@ export class ChatwootService {
     }
   }
 
+  public async updateGroupConversation(
+    instance: InstanceDto,
+    groupSourceId: string,
+    data: { group_title?: string },
+  ): Promise<boolean> {
+    try {
+      const filterInbox = await this.getInbox(instance);
+      if (!filterInbox) {
+        this.logger.warn('inbox not found');
+        return false;
+      }
+
+      // Find the group conversation by group_source_id
+      const groupConversation = await this.findGroupConversationBySourceId(instance, filterInbox.id, groupSourceId);
+
+      if (!groupConversation || !groupConversation[0]) {
+        this.logger.verbose(`No group conversation found for group_source_id: ${groupSourceId}`);
+        return false;
+      }
+
+      const conversationId = groupConversation[0].id;
+
+      // Update conversation using direct API call
+      await chatwootRequest(this.getClientCwConfig(), {
+        method: 'PUT',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}`,
+        body: data,
+      });
+
+      this.logger.verbose(`Updated group conversation ${conversationId} with title: ${data.group_title}`);
+
+      // Also update the contact name (group contact)
+      const contact = await this.findContact(instance, groupSourceId);
+      if (contact && data.group_title) {
+        await this.updateContact(instance, contact.id, { name: data.group_title });
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error(`Error updating group conversation: ${error}`);
+      return false;
+    }
+  }
+
   public async createMessage(
     instance: InstanceDto,
     conversationId: number,
@@ -2701,6 +2745,75 @@ export class ChatwootService {
         });
 
         await this.createBotMessage(instance, msgStatus, 'incoming');
+      }
+
+      if (event === Events.GROUPS_UPDATE) {
+        this.logger.verbose(`Group update received: ${JSON.stringify(body)}`);
+        if (Array.isArray(body)) {
+          for (const groupUpdate of body) {
+            if (groupUpdate.id && groupUpdate.subject) {
+              this.logger.verbose(`Group update received: ${groupUpdate.id} - new subject: ${groupUpdate.subject}`);
+              await this.updateGroupConversation(instance, groupUpdate.id, {
+                group_title: groupUpdate.subject,
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      if (event === Events.GROUP_PARTICIPANTS_UPDATE) {
+        this.logger.verbose(`Group participants update received: ${JSON.stringify(body)}`);
+        const { id: groupId, participants, action } = body;
+
+        if (!groupId || !participants) {
+          this.logger.warn('Missing groupId or participants in group-participants.update event');
+          return;
+        }
+
+        const filterInbox = await this.getInbox(instance);
+        if (!filterInbox) return;
+
+        // Find the group conversation
+        const groupConversation = await this.findGroupConversationBySourceId(instance, filterInbox.id, groupId);
+        if (!groupConversation || !groupConversation[0]) {
+          this.logger.verbose(`No group conversation found for group_source_id: ${groupId}`);
+          return;
+        }
+
+        const conversationId = groupConversation[0].id;
+
+        if (action === 'add') {
+          // Get full group metadata to sync all participants
+          try {
+            const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(groupId);
+            if (group?.participants) {
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, group.participants).catch((err) =>
+                this.logger.error(`Error syncing group participants after add: ${err}`),
+              );
+            }
+          } catch (error) {
+            this.logger.error(`Error getting group metadata for participant sync: ${error}`);
+          }
+        } else if (action === 'remove') {
+          // For remove, we also sync to update the group contacts list
+          try {
+            const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(groupId);
+            if (group?.participants) {
+              // Clear the sync cache to force a fresh sync
+              const syncCacheKey = `${instance.instanceName}:syncGroupParticipants-${conversationId}`;
+              await this.cache.delete(syncCacheKey);
+
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, group.participants).catch((err) =>
+                this.logger.error(`Error syncing group participants after remove: ${err}`),
+              );
+            }
+          } catch (error) {
+            this.logger.error(`Error getting group metadata for participant sync: ${error}`);
+          }
+        }
+
+        return;
       }
 
       if (event === 'connection.update' && body.status === 'open') {
