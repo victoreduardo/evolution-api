@@ -825,7 +825,8 @@ export class ChatwootService {
 
         let inboxConversation = null;
         if (isGroup) {
-          inboxConversation = await this.findGroupConversationBySourceId(instance, filterInbox.id, chatId);
+          const groupConversations = await this.findGroupConversationBySourceId(instance, filterInbox.id, chatId);
+          inboxConversation = groupConversations && groupConversations.length > 0 ? groupConversations[0] : null;
         } else {
           inboxConversation = contactConversations.payload.find(
             (conversation) => conversation.inbox_id == filterInbox.id,
@@ -835,7 +836,7 @@ export class ChatwootService {
         if (inboxConversation) {
           if (this.provider.reopenConversation) {
             this.logger.verbose(
-              `Found conversation in reopenConversation mode: ID: ${inboxConversation.id} - Name: ${inboxConversation.meta.sender.name} - Identifier: ${inboxConversation.meta.sender.identifier}`,
+              `Found conversation in reopenConversation mode: ID: ${inboxConversation.id} - Name: ${inboxConversation.meta?.sender?.name} - Identifier: ${inboxConversation.meta?.sender?.identifier}`,
             );
             if (inboxConversation && this.provider.conversationPending && inboxConversation.status !== 'open') {
               await client.conversations.toggleStatus({
@@ -972,7 +973,7 @@ export class ChatwootService {
       // Search for conversations filtering by inbox and looking for group_source_id
       // Using direct API call since SDK might not support group_source_id filter
       const response = await chatwootRequest(this.getClientCwConfig(), {
-        method: 'GET',
+        method: 'POST',
         url: `/api/v1/accounts/${this.provider.accountId}/conversations/filter`,
         body: {
           payload: [
@@ -992,13 +993,18 @@ export class ChatwootService {
         },
       });
 
+      // Handle both response formats (with and without data wrapper)
+      let conversations = null;
       if (response && (response as any).data && (response as any).data.payload) {
-        const conversations = (response as any).data.payload;
-        if (conversations) {
-          this.logger.verbose(`Found group conversation by group_source_id: ${groupSourceId}`);
-          this.cache.set(cacheKey, conversations, 1800);
-          return conversations;
-        }
+        conversations = (response as any).data.payload;
+      } else if (response && (response as any).payload) {
+        conversations = (response as any).payload;
+      }
+
+      if (conversations && Array.isArray(conversations) && conversations.length > 0) {
+        this.logger.verbose(`Found group conversation by group_source_id: ${groupSourceId}`);
+        this.cache.set(cacheKey, conversations, 1800);
+        return conversations;
       }
 
       this.logger.verbose(`No existing group conversation found for group_source_id: ${groupSourceId}`);
