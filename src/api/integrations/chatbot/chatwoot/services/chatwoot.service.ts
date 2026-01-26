@@ -54,7 +54,7 @@ export class ChatwootService {
     private readonly configService: ConfigService,
     private readonly prismaRepository: PrismaRepository,
     private readonly cache: CacheService,
-  ) {}
+  ) { }
 
   private pgClient = postgresClient.getChatwootConnection();
 
@@ -734,7 +734,7 @@ export class ChatwootService {
           this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
 
           const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
-          nameContact = `${group.subject} (GROUP)`;
+          nameContact = group.subject;
 
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
             participantJid.split('@')[0],
@@ -820,9 +820,15 @@ export class ChatwootService {
           return null;
         }
 
-        let inboxConversation = contactConversations.payload.find(
-          (conversation) => conversation.inbox_id == filterInbox.id,
-        );
+        let inboxConversation = null;
+        if (isGroup) {
+          inboxConversation = await this.findGroupConversationBySourceId(instance, filterInbox.id, chatId);
+        } else {
+          inboxConversation = contactConversations.payload.find(
+            (conversation) => conversation.inbox_id == filterInbox.id,
+          );
+        }
+
         if (inboxConversation) {
           if (this.provider.reopenConversation) {
             this.logger.verbose(
@@ -840,7 +846,7 @@ export class ChatwootService {
           } else {
             inboxConversation = contactConversations.payload.find(
               (conversation) =>
-                conversation && conversation.status !== 'resolved' && conversation.inbox_id == filterInbox.id,
+                conversation && conversation.status !== 'resolved' && conversation.inbox_id == filterInbox.id && conversation.group === isGroup,
             );
             this.logger.verbose(`Found conversation: ${JSON.stringify(inboxConversation)}`);
           }
@@ -856,6 +862,13 @@ export class ChatwootService {
           contact_id: contactId.toString(),
           inbox_id: filterInbox.id.toString(),
         };
+
+        if (isGroup) {
+          data['group'] = true;
+          data['group_source_id'] = chatId;
+          data['group_title'] = nameContact || chatId;
+          this.logger.verbose(`Creating group conversation with group_source_id: ${chatId}, group_title: ${data['group_title']}`);
+        }
 
         if (this.provider.conversationPending) {
           data['status'] = 'pending';
@@ -915,6 +928,66 @@ export class ChatwootService {
 
     this.cache.set(cacheKey, findByName);
     return findByName;
+  }
+
+  public async findGroupConversationBySourceId(
+    instance: InstanceDto,
+    inboxId: number,
+    groupSourceId: string,
+  ): Promise<any | null> {
+    try {
+      const cacheKey = `${instance.instanceName}:groupConversation-${groupSourceId}`;
+
+      if (await this.cache.has(cacheKey)) {
+        const cachedGroups = (await this.cache.get(cacheKey)) as any;
+        this.logger.verbose(`Found cached group conversation for ${groupSourceId}: ${cachedGroups}`);
+        return cachedGroups;
+      }
+
+      const client = await this.clientCw(instance);
+      if (!client) {
+        this.logger.warn('client not found');
+        return null;
+      }
+
+      // Search for conversations filtering by inbox and looking for group_source_id
+      // Using direct API call since SDK might not support group_source_id filter
+      const response = await chatwootRequest(this.getClientCwConfig(), {
+        method: 'GET',
+        url: `/api/v1/accounts/${this.provider.accountId}/conversations/filter`,
+        body: {
+          payload: [
+            {
+              attribute_key: 'inbox_id',
+              filter_operator: 'equal_to',
+              values: [inboxId],
+              attribute_model: 'standard',
+            },
+            {
+              attribute_key: 'group_source_id',
+              filter_operator: 'equal_to',
+              values: [groupSourceId],
+              attribute_model: 'standard',
+            },
+          ],
+        },
+      });
+
+      if (response && (response as any).data && (response as any).data.payload) {
+        const conversations = (response as any).data.payload;
+        if (conversations) {
+          this.logger.verbose(`Found group conversation by group_source_id: ${groupSourceId}`);
+          this.cache.set(cacheKey, conversations, 1800);
+          return conversations;
+        }
+      }
+
+      this.logger.verbose(`No existing group conversation found for group_source_id: ${groupSourceId}`);
+      return null;
+    } catch (error) {
+      this.logger.error(`Error finding group conversation by source_id: ${error}`);
+      return null;
+    }
   }
 
   public async createMessage(
@@ -1338,10 +1411,10 @@ export class ChatwootService {
       // Chatwoot to Whatsapp
       const messageReceived = body.content
         ? body.content
-            .replaceAll(/(?<!\*)\*((?!\s)([^\n*]+?)(?<!\s))\*(?!\*)/g, '_$1_') // Substitui * por _
-            .replaceAll(/\*{2}((?!\s)([^\n*]+?)(?<!\s))\*{2}/g, '*$1*') // Substitui ** por *
-            .replaceAll(/~{2}((?!\s)([^\n*]+?)(?<!\s))~{2}/g, '~$1~') // Substitui ~~ por ~
-            .replaceAll(/(?<!`)`((?!\s)([^`*]+?)(?<!\s))`(?!`)/g, '```$1```') // Substitui ` por ```
+          .replaceAll(/(?<!\*)\*((?!\s)([^\n*]+?)(?<!\s))\*(?!\*)/g, '_$1_') // Substitui * por _
+          .replaceAll(/\*{2}((?!\s)([^\n*]+?)(?<!\s))\*{2}/g, '*$1*') // Substitui ** por *
+          .replaceAll(/~{2}((?!\s)([^\n*]+?)(?<!\s))~{2}/g, '~$1~') // Substitui ~~ por ~
+          .replaceAll(/(?<!`)`((?!\s)([^`*]+?)(?<!\s))`(?!`)/g, '```$1```') // Substitui ` por ```
         : body.content;
 
       const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
@@ -2008,9 +2081,9 @@ export class ChatwootService {
         const originalMessage = await this.getConversationMessage(body.message);
         const bodyMessage = originalMessage
           ? originalMessage
-              .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
-              .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
-              .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
+            .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
+            .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
+            .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
           : originalMessage;
 
         if (bodyMessage && bodyMessage.includes('/survey/responses/') && bodyMessage.includes('http')) {
@@ -2080,7 +2153,7 @@ export class ChatwootService {
           const fileData = Buffer.from(downloadBase64.base64, 'base64');
 
           const fileStream = new Readable();
-          fileStream._read = () => {};
+          fileStream._read = () => { };
           fileStream.push(fileData);
           fileStream.push(null);
 
@@ -2234,7 +2307,7 @@ export class ChatwootService {
           const processedBuffer = await img.getBuffer(JimpMime.png);
 
           const fileStream = new Readable();
-          fileStream._read = () => {}; // _read is required but you can noop it
+          fileStream._read = () => { }; // _read is required but you can noop it
           fileStream.push(processedBuffer);
           fileStream.push(null);
 
@@ -2496,7 +2569,7 @@ export class ChatwootService {
           const fileData = Buffer.from(body?.qrcode.base64.replace('data:image/png;base64,', ''), 'base64');
 
           const fileStream = new Readable();
-          fileStream._read = () => {};
+          fileStream._read = () => { };
           fileStream.push(fileData);
           fileStream.push(null);
 
