@@ -763,6 +763,36 @@ export class ChatwootService {
           this.cache.delete(cacheKey);
           return await this.createConversation(instance, body);
         }
+
+        // Check if conversation is resolved and reopenConversation is disabled
+        if (conversationExists.status === 'resolved' && !this.provider.reopenConversation) {
+          this.logger.verbose('Conversation is resolved and reopenConversation is disabled, invalidating cache to create new conversation');
+          this.cache.delete(cacheKey);
+          return await this.createConversation(instance, body);
+        }
+
+        // If reopenConversation is enabled and conversation is resolved, reopen it
+        if (conversationExists.status === 'resolved' && this.provider.reopenConversation) {
+          this.logger.verbose(`Reopening resolved conversation: ${conversationId}`);
+          if (this.provider.conversationPending) {
+            await client.conversations.toggleStatus({
+              accountId: this.provider.accountId,
+              conversationId: conversationId,
+              data: {
+                status: 'pending',
+              },
+            });
+          } else {
+            await client.conversations.toggleStatus({
+              accountId: this.provider.accountId,
+              conversationId: conversationId,
+              data: {
+                status: 'open',
+              },
+            });
+          }
+        }
+
         return conversationId;
       }
 
