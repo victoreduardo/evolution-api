@@ -629,6 +629,74 @@ export class ChatwootService {
     return filterPayload;
   }
 
+  /**
+   * Ensures a group participant contact exists in Chatwoot.
+   * This is called for every group message to make sure the sender contact exists
+   * before the message is created, allowing proper sender_id attribution.
+   */
+  private async ensureGroupParticipantContact(instance: InstanceDto, body: any, isLid: boolean): Promise<void> {
+    try {
+      // Use participantAlt when in LID mode to get the real phone number
+      const participantJid =
+        isLid && body.key.participantAlt ? body.key.participantAlt : body.key.participant;
+
+      // Skip if participant is a LID and we don't have the real phone number
+      if (!participantJid || participantJid.endsWith('@lid')) {
+        this.logger.verbose(`Skipping participant contact creation - LID without phone number: ${participantJid}`);
+        return;
+      }
+
+      const participantPhone = participantJid.split('@')[0].split(':')[0];
+      const cacheKey = `${instance.instanceName}:participantContact-${participantPhone}`;
+
+      // Check if we recently processed this participant (cache for 5 minutes)
+      if (await this.cache.has(cacheKey)) {
+        this.logger.verbose(`Participant contact recently processed: ${participantPhone}`);
+        return;
+      }
+
+      const filterInbox = await this.getInbox(instance);
+      if (!filterInbox) {
+        this.logger.warn('Inbox not found for participant contact creation');
+        return;
+      }
+
+      const findParticipant = await this.findContact(instance, participantPhone);
+
+      if (findParticipant) {
+        this.logger.verbose(
+          `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
+        );
+        // Update name if needed
+        if (!findParticipant.name || findParticipant.name === participantPhone) {
+          const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(participantPhone);
+          await this.updateContact(instance, findParticipant.id, {
+            name: body.pushName,
+            avatar_url: picture_url?.profilePictureUrl || null,
+          });
+        }
+      } else {
+        // Create new participant contact
+        this.logger.verbose(`Creating participant contact: ${participantPhone} - ${body.pushName}`);
+        const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(participantPhone);
+        await this.createContact(
+          instance,
+          participantPhone,
+          filterInbox.id,
+          false,
+          body.pushName,
+          picture_url?.profilePictureUrl || null,
+          participantJid,
+        );
+      }
+
+      // Cache to avoid processing the same participant too frequently
+      await this.cache.set(cacheKey, true, 300); // 5 minutes
+    } catch (error) {
+      this.logger.error(`Error ensuring group participant contact: ${error}`);
+    }
+  }
+
   public async createConversation(instance: InstanceDto, body: any) {
     const isLid = body.key.addressingMode === 'lid';
     const isGroup = body.key.remoteJid.endsWith('@g.us');
@@ -666,6 +734,12 @@ export class ChatwootService {
       }
       this.logger.verbose(`--- Start createConversation ---`);
       this.logger.verbose(`Instance: ${JSON.stringify(instance)}`);
+
+      // Process participant contact for group messages (needed for sender_id in messages)
+      // This must happen regardless of whether conversation is cached or not
+      if (isGroup && !body.key.fromMe) {
+        await this.ensureGroupParticipantContact(instance, body, isLid);
+      }
 
       // If it already exists in the cache, return conversationId
       if (await this.cache.has(cacheKey)) {
@@ -735,38 +809,8 @@ export class ChatwootService {
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
           this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
           groupParticipants = group.participants || [];
-
-          const participantJid = isLid && !body.key.fromMe ? body.key.participantAlt : body.key.participant;
           nameContact = group.subject;
-
-          const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(
-            participantJid.split('@')[0],
-          );
-          this.logger.verbose(`Participant profile picture URL: ${JSON.stringify(picture_url)}`);
-
-          const findParticipant = await this.findContact(instance, participantJid.split('@')[0]);
-
-          if (findParticipant) {
-            this.logger.verbose(
-              `Found participant: ID:${findParticipant.id} - Name: ${findParticipant.name} - identifier: ${findParticipant.identifier}`,
-            );
-            if (!findParticipant.name || findParticipant.name === chatId) {
-              await this.updateContact(instance, findParticipant.id, {
-                name: body.pushName,
-                avatar_url: picture_url.profilePictureUrl || null,
-              });
-            }
-          } else {
-            await this.createContact(
-              instance,
-              participantJid.split('@')[0].split(':')[0],
-              filterInbox.id,
-              false,
-              body.pushName,
-              picture_url.profilePictureUrl || null,
-              participantJid,
-            );
-          }
+          // Note: Participant contact creation is handled by ensureGroupParticipantContact() before cache check
         }
 
         const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(chatId);
@@ -956,11 +1000,12 @@ export class ChatwootService {
     groupSourceId: string,
   ): Promise<any | null> {
     try {
-      const cacheKey = `${instance.instanceName}:groupConversation-${groupSourceId}`;
+      // Include inboxId in cache key since same group can exist in multiple inboxes
+      const cacheKey = `${instance.instanceName}:groupConversation-${inboxId}-${groupSourceId}`;
 
       if (await this.cache.has(cacheKey)) {
         const cachedGroups = (await this.cache.get(cacheKey)) as any;
-        this.logger.verbose(`Found cached group conversation for ${groupSourceId}: ${cachedGroups}`);
+        this.logger.verbose(`Found cached group conversation for inbox ${inboxId}, group ${groupSourceId}`);
         return cachedGroups;
       }
 
@@ -1125,6 +1170,13 @@ export class ChatwootService {
       const contactIds: number[] = [];
 
       for (const participant of participants) {
+        // Skip LID participants - they will be created correctly when they send a message
+        // LID participants don't have the real phone number, so we can't create a proper contact
+        if (participant.id?.endsWith('@lid')) {
+          this.logger.verbose(`Skipping LID participant: ${participant.id}`);
+          continue;
+        }
+
         const participantPhone = participant.id?.split('@')[0]?.split(':')[0];
         if (!participantPhone) continue;
 
@@ -1222,6 +1274,7 @@ export class ChatwootService {
     messageBody?: any,
     sourceId?: string,
     quotedMsg?: MessageModel,
+    senderId?: number,
   ) {
     const client = await this.clientCw(instance);
 
@@ -1234,20 +1287,28 @@ export class ChatwootService {
 
     const sourceReplyId = quotedMsg?.chatwootMessageId || null;
 
+    const messageData: any = {
+      content: content,
+      message_type: messageType,
+      attachments: attachments,
+      private: privateMessage || false,
+      source_id: sourceId,
+      content_attributes: {
+        ...replyToIds,
+      },
+      source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
+    };
+
+    // Add sender_id for group messages to identify who sent the message
+    if (senderId) {
+      messageData.sender_id = senderId;
+      messageData.sender_type = 'Contact';
+    }
+
     const message = await client.messages.create({
       accountId: this.provider.accountId,
       conversationId: conversationId,
-      data: {
-        content: content,
-        message_type: messageType,
-        attachments: attachments,
-        private: privateMessage || false,
-        source_id: sourceId,
-        content_attributes: {
-          ...replyToIds,
-        },
-        source_reply_id: sourceReplyId ? sourceReplyId.toString() : null,
-      },
+      data: messageData,
     });
 
     if (!message) {
@@ -1348,6 +1409,7 @@ export class ChatwootService {
     messageBody?: any,
     sourceId?: string,
     quotedMsg?: MessageModel,
+    senderId?: number,
   ) {
     if (sourceId && this.isImportHistoryAvailable()) {
       const messageAlreadySaved = await chatwootImport.getExistingSourceIds([sourceId], conversationId);
@@ -1387,6 +1449,12 @@ export class ChatwootService {
 
     if (sourceId) {
       data.append('source_id', sourceId);
+    }
+
+    // Add sender_id for group messages to identify who sent the message
+    if (senderId) {
+      data.append('sender_id', senderId.toString());
+      data.append('sender_type', 'Contact');
     }
 
     const config = {
@@ -2383,14 +2451,24 @@ export class ChatwootService {
                 : body.key.participant.split('@')[0].split(':')[0];
             const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
 
-            let content: string;
+            const content = bodyMessage || '';
 
-            if (!body.key.fromMe) {
-              content = bodyMessage
-                ? `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`
-                : `**${formattedPhoneNumber} - ${participantName}:**`;
-            } else {
-              content = bodyMessage || '';
+            // Find participant contact to get sender_id for group message
+            let participantSenderId: number | undefined;
+            if (!body.key.fromMe && rawPhoneNumber) {
+              const participantContact = await this.findContact(instance, rawPhoneNumber);
+              if (participantContact) {
+                participantSenderId = participantContact.id;
+                this.logger.verbose(`Found participant contact for group media message: ID:${participantSenderId}`);
+
+                // Ensure participant is added to the group conversation before sending message
+                const groupContacts = await this.getGroupContacts(instance, getConversation);
+                const isParticipantInGroup = groupContacts?.some((c: any) => c.id === participantSenderId);
+                if (!isParticipantInGroup) {
+                  this.logger.verbose(`Adding participant ${participantSenderId} to group conversation ${getConversation}`);
+                  await this.addGroupContacts(instance, getConversation, [participantSenderId]);
+                }
+              }
             }
 
             const send = await this.sendData(
@@ -2403,6 +2481,7 @@ export class ChatwootService {
               body,
               'WAID:' + body.key.id,
               quotedMsg,
+              participantSenderId,
             );
 
             if (!send) {
@@ -2565,12 +2644,24 @@ export class ChatwootService {
               : body.key.participant.split('@')[0].split(':')[0];
           const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
 
-          let content: string;
+          const content = bodyMessage || '';
 
-          if (!body.key.fromMe) {
-            content = `**${formattedPhoneNumber} - ${participantName}:**\n\n${bodyMessage}`;
-          } else {
-            content = `${bodyMessage}`;
+          // Find participant contact to get sender_id for group message
+          let participantSenderId: number | undefined;
+          if (!body.key.fromMe && rawPhoneNumber) {
+            const participantContact = await this.findContact(instance, rawPhoneNumber);
+            if (participantContact) {
+              participantSenderId = participantContact.id;
+              this.logger.verbose(`Found participant contact for group text message: ID:${participantSenderId}`);
+
+              // Ensure participant is added to the group conversation before sending message
+              const groupContacts = await this.getGroupContacts(instance, getConversation);
+              const isParticipantInGroup = groupContacts?.some((c: any) => c.id === participantSenderId);
+              if (!isParticipantInGroup) {
+                this.logger.verbose(`Adding participant ${participantSenderId} to group conversation ${getConversation}`);
+                await this.addGroupContacts(instance, getConversation, [participantSenderId]);
+              }
+            }
           }
 
           const send = await this.createMessage(
@@ -2583,6 +2674,7 @@ export class ChatwootService {
             body,
             'WAID:' + body.key.id,
             quotedMsg,
+            participantSenderId,
           );
 
           if (!send) {
