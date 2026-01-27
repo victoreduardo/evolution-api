@@ -13,7 +13,7 @@ COPY ./package*.json ./
 COPY ./tsconfig.json ./
 COPY ./tsup.config.ts ./
 
-RUN npm ci --silent
+RUN --mount=type=cache,target=/root/.npm npm ci --silent
 
 COPY ./src ./src
 COPY ./public ./public
@@ -33,7 +33,8 @@ RUN npm run build
 FROM node:24-alpine AS final
 
 RUN apk update && \
-    apk add tzdata ffmpeg bash openssl
+    apk add --no-cache tzdata ffmpeg bash openssl && \
+    rm -rf /var/cache/apk/*
 
 ENV TZ=America/Sao_Paulo
 ENV DOCKER_ENV=true
@@ -42,7 +43,6 @@ WORKDIR /evolution
 
 COPY --from=builder /evolution/package.json ./package.json
 COPY --from=builder /evolution/package-lock.json ./package-lock.json
-
 COPY --from=builder /evolution/node_modules ./node_modules
 COPY --from=builder /evolution/dist ./dist
 COPY --from=builder /evolution/prisma ./prisma
@@ -51,9 +51,20 @@ COPY --from=builder /evolution/public ./public
 COPY --from=builder /evolution/.env ./.env
 COPY --from=builder /evolution/Docker ./Docker
 COPY --from=builder /evolution/runWithProvider.js ./runWithProvider.js
-COPY --from=builder /evolution/tsup.config.ts ./tsup.config.ts
 
-ENV DOCKER_ENV=true
+RUN npm prune --omit=dev && \
+    rm -rf node_modules/.cache \
+           node_modules/*/.git \
+           node_modules/*/test \
+           node_modules/*/tests \
+           node_modules/*/__tests__ \
+           node_modules/*/docs \
+           node_modules/*/*.md \
+           node_modules/*/LICENSE* \
+           node_modules/*/.eslintrc* \
+           node_modules/*/.prettierrc* \
+           node_modules/*/CHANGELOG* \
+           node_modules/*/.github
 
 EXPOSE 8080
 
