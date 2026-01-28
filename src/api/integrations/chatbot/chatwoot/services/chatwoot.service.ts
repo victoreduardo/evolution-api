@@ -323,7 +323,7 @@ export class ChatwootService {
         data = {
           inbox_id: inboxId,
           name: name || phoneNumber,
-          identifier: phoneNumber,
+          identifier: jid,
           avatar_url: avatar_url,
         };
       }
@@ -637,21 +637,21 @@ export class ChatwootService {
   private async ensureGroupParticipantContact(instance: InstanceDto, body: any, isLid: boolean): Promise<void> {
     try {
       // Use participantAlt when in LID mode to get the real phone number
-      const participantJid =
-        isLid && body.key.participantAlt ? body.key.participantAlt : body.key.participant;
+      const participantLid = isLid ? body.key.participant : body.key.participantAlt;
+      const participantAlt = body.key.participantAlt || body.key.participant;
 
       // Skip if participant is a LID and we don't have the real phone number
-      if (!participantJid || participantJid.endsWith('@lid')) {
-        this.logger.verbose(`Skipping participant contact creation - LID without phone number: ${participantJid}`);
+      if (!participantAlt) {
+        this.logger.verbose(`Skipping participant contact creation - LID without phone number: ${participantLid}`);
         return;
       }
 
-      const participantPhone = participantJid.split('@')[0].split(':')[0];
-      const cacheKey = `${instance.instanceName}:participantContact-${participantPhone}`;
+      const participantPhone = participantAlt.split('@')[0].split(':')[0];
+      const cacheKey = `${instance.instanceName}:participantContact-${participantLid}`;
 
       // Check if we recently processed this participant (cache for 5 minutes)
       if (await this.cache.has(cacheKey)) {
-        this.logger.verbose(`Participant contact recently processed: ${participantPhone}`);
+        this.logger.verbose(`Participant contact recently processed: ${participantLid}`);
         return;
       }
 
@@ -670,10 +670,14 @@ export class ChatwootService {
         // Update name if needed
         if (!findParticipant.name || findParticipant.name === participantPhone) {
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(participantPhone);
-          await this.updateContact(instance, findParticipant.id, {
+          const contactData: { name: any; avatar_url: any; identifier?: string } = {
             name: body.pushName,
             avatar_url: picture_url?.profilePictureUrl || null,
-          });
+          };
+          if (findParticipant.identifier !== participantLid) {
+            contactData.identifier = participantLid;
+          }
+          await this.updateContact(instance, findParticipant.id, contactData);
         }
       } else {
         // Create new participant contact
@@ -686,7 +690,7 @@ export class ChatwootService {
           false,
           body.pushName,
           picture_url?.profilePictureUrl || null,
-          participantJid,
+          participantLid,
         );
       }
 
@@ -717,7 +721,7 @@ export class ChatwootService {
             `Identifier needs update: (contact.identifier: ${contact.identifier}, phoneNumber: ${phoneNumber}, body.key.remoteJidAlt: ${remoteJid}`,
           );
           const updateContact = await this.updateContact(instance, contact.id, {
-            identifier: phoneNumber,
+            identifier: remoteJid,
             phone_number: `+${phoneNumber.split('@')[0]}`,
           });
 
@@ -875,7 +879,7 @@ export class ChatwootService {
             isGroup,
             nameContact,
             picture_url.profilePictureUrl || null,
-            phoneNumber,
+            remoteJid,
           );
         }
 
