@@ -433,45 +433,30 @@ export class ChatwootService {
       return null;
     }
 
-    // Direct search by query (q) - most common way to search by identifier/email/phone
-    const contact = (await (client as any).get('contacts/search', {
-      params: {
-        q: identifier,
-        sort: 'name',
-      },
-    })) as any;
-
-    if (contact && contact.data && contact.data.payload && contact.data.payload.length > 0) {
-      return contact.data.payload[0];
-    }
-
-    // Fallback for older API versions or different response structures
-    if (contact && contact.payload && contact.payload.length > 0) {
-      return contact.payload[0];
-    }
-
-    // Try search by attribute
-    const contactByAttr = (await (client as any).post('contacts/filter', {
-      payload: [
-        {
-          attribute_key: 'identifier',
-          filter_operator: 'equal_to',
-          values: [identifier],
-          query_operator: null,
+    try {
+      const contactByAttr = (await chatwootRequest(this.getClientCwConfig(), {
+        method: 'POST',
+        url: `/api/v1/accounts/${this.provider.accountId}/contacts/filter`,
+        body: {
+          payload: [
+            {
+              attribute_key: 'identifier',
+              filter_operator: 'equal_to',
+              values: [identifier]
+            },
+          ],
         },
-      ],
-    })) as any;
+      })) as any;
 
-    if (contactByAttr && contactByAttr.payload && contactByAttr.payload.length > 0) {
-      return contactByAttr.payload[0];
+      if (contactByAttr?.payload?.length > 0) {
+        return contactByAttr.payload[0];
+      }
+
+      return null;
+    } catch (error) {
+      this.logger.error(`Error finding contact by identifier: ${error}`);
+      return null;
     }
-
-    // Check inside data property if using axios interceptors wrapper
-    if (contactByAttr && contactByAttr.data && contactByAttr.data.payload && contactByAttr.data.payload.length > 0) {
-      return contactByAttr.data.payload[0];
-    }
-
-    return null;
   }
 
   public async findContact(instance: InstanceDto, phoneNumber: string) {
@@ -661,7 +646,11 @@ export class ChatwootService {
         return;
       }
 
-      const findParticipant = await this.findContact(instance, participantPhone);
+      let findParticipant = await this.findContact(instance, participantPhone);
+
+      if (!findParticipant) {
+        findParticipant = await this.findContactByIdentifier(instance, participantLid);
+      }
 
       if (findParticipant) {
         this.logger.verbose(
@@ -670,18 +659,21 @@ export class ChatwootService {
         // Update name if needed
         if (!findParticipant.name || findParticipant.name === participantPhone) {
           const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(participantPhone);
-          const contactData: { name: any; avatar_url: any; identifier?: string } = {
+          const contactData: { name: any; avatar_url: any; identifier?: string; phone_number?: string } = {
             name: body.pushName,
             avatar_url: picture_url?.profilePictureUrl || null,
           };
           if (findParticipant.identifier !== participantLid) {
             contactData.identifier = participantLid;
           }
+          if (findParticipant.phone_number !== participantPhone) {
+            contactData.phone_number = participantPhone;
+          }
           await this.updateContact(instance, findParticipant.id, contactData);
         }
       } else {
         // Create new participant contact
-        this.logger.verbose(`Creating participant contact: ${participantPhone} - ${body.pushName}`);
+        this.logger.verbose(`Creating participant contact: ${participantPhone} - ${body.pushName} - ${participantLid}`);
         const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(participantPhone);
         await this.createContact(
           instance,
@@ -841,10 +833,11 @@ export class ChatwootService {
         if (isGroup) {
           this.logger.verbose(`Processing group conversation`);
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
-          this.logger.verbose(`Group metadata: JID:${group.JID} - Subject:${group?.subject || group?.Name}`);
-          groupParticipants = group.participants || [];
+          this.logger.verbose(`Group ${chatId} metadata: ${JSON.stringify(group)}`);
+          const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: chatId });
+          this.logger.verbose(`Group ${chatId} participants: ${JSON.stringify(participants)}`);
+          groupParticipants = participants.participants || [];
           nameContact = group.subject;
-          // Note: Participant contact creation is handled by ensureGroupParticipantContact() before cache check
         }
 
         const picture_url = await this.waMonitor.waInstances[instance.instanceName].profilePicture(chatId);
@@ -860,7 +853,7 @@ export class ChatwootService {
               picture_url?.profilePictureUrl?.split('#')[0].split('?')[0].split('/').pop() || '';
             const chatwootProfilePictureFile = contact?.thumbnail?.split('#')[0].split('?')[0].split('/').pop() || '';
             const pictureNeedsUpdate = waProfilePictureFile !== chatwootProfilePictureFile;
-            const nameNeedsUpdate = !contact.name || contact.name === chatId;
+            const nameNeedsUpdate = !contact.name || contact.name === chatId || contact.name === remoteJid;
             this.logger.verbose(`Picture needs update: ${pictureNeedsUpdate}`);
             this.logger.verbose(`Name needs update: ${nameNeedsUpdate}`);
             if (pictureNeedsUpdate || nameNeedsUpdate) {
@@ -1095,6 +1088,14 @@ export class ChatwootService {
 
   public async getGroupContacts(instance: InstanceDto, conversationId: number): Promise<any[] | null> {
     try {
+      const cacheKey = `${instance.instanceName}:groupContacts-${conversationId}`;
+      const cachedContacts = await this.cache.get(cacheKey);
+
+      if (cachedContacts) {
+        this.logger.verbose(`Returning cached group contacts for conversation ${conversationId}`);
+        return cachedContacts as any[];
+      }
+
       const client = await this.clientCw(instance);
       if (!client) {
         this.logger.warn('client not found');
@@ -1107,6 +1108,8 @@ export class ChatwootService {
       });
 
       if (response && Array.isArray(response)) {
+        // Cache for 5 minutes (300 seconds)
+        this.cache.set(cacheKey, response, 300);
         return response;
       }
 
@@ -1131,6 +1134,10 @@ export class ChatwootService {
         body: { contact_ids: contactIds },
       });
 
+      // Invalidate cache after adding contacts
+      const cacheKey = `${instance.instanceName}:groupContacts-${conversationId}`;
+      await this.cache.delete(cacheKey);
+
       this.logger.verbose(`Added ${contactIds.length} contacts to group conversation ${conversationId}`);
       return response as any[];
     } catch (error) {
@@ -1153,6 +1160,10 @@ export class ChatwootService {
         body: { contact_ids: contactIds },
       });
 
+      // Invalidate cache after updating contacts
+      const cacheKey = `${instance.instanceName}:groupContacts-${conversationId}`;
+      await this.cache.delete(cacheKey);
+
       this.logger.verbose(`Updated group contacts for conversation ${conversationId} with ${contactIds.length} contacts`);
       return response as any[];
     } catch (error) {
@@ -1174,6 +1185,10 @@ export class ChatwootService {
         url: `/api/v1/accounts/${this.provider.accountId}/conversations/${conversationId}/group_contacts`,
         body: { contact_ids: contactIds },
       });
+
+      // Invalidate cache after removing contacts
+      const cacheKey = `${instance.instanceName}:groupContacts-${conversationId}`;
+      await this.cache.delete(cacheKey);
 
       this.logger.verbose(`Removed ${contactIds.length} contacts from group conversation ${conversationId}`);
       return true;
@@ -1203,18 +1218,36 @@ export class ChatwootService {
 
       const contactIds: number[] = [];
 
+      this.logger.verbose(`Participants: ${JSON.stringify(participants)}`);
       for (const participant of participants) {
-        // Skip LID participants - they will be created correctly when they send a message
-        // LID participants don't have the real phone number, so we can't create a proper contact
-        if (participant.id?.endsWith('@lid')) {
-          this.logger.verbose(`Skipping LID participant: ${participant.id}`);
-          continue;
+        let participantPhone = participant.phoneNumber?.split('@')[0];
+
+        if (participant.id?.endsWith('@lid') && !participantPhone) {
+          const waInstance = this.waMonitor.waInstances[instance.instanceName];
+          const jid = participant.id;
+
+          if (waInstance?.client?.signalRepository?.lidMapping) {
+            try {
+              const resolvedPN = await waInstance.client.signalRepository.lidMapping.getPNForLID(jid);
+              if (resolvedPN) {
+                participantPhone = resolvedPN.split('@')[0].split(':')[0];
+                this.logger.verbose(`Resolved LID ${jid} to phone number: ${participantPhone}`);
+              }
+            } catch (lidError) {
+              this.logger.verbose(`Could not resolve LID ${jid}: ${lidError}`);
+              continue;
+            }
+          }
         }
 
-        const participantPhone = participant.id?.split('@')[0]?.split(':')[0];
         if (!participantPhone) continue;
 
         let contact = await this.findContact(instance, participantPhone);
+
+        if (!contact) {
+          this.logger.verbose(`Contact not found for phone number: ${participantPhone}, searching by identifier: ${participant.id}`);
+          contact = await this.findContactByIdentifier(instance, participant.id);
+        }
 
         if (!contact) {
           // Create the contact if it doesn't exist
@@ -1224,7 +1257,7 @@ export class ChatwootService {
             inboxId,
             false,
             participant.name || participantPhone,
-            null,
+            participant.imgUrl || null,
             participant.id,
           );
 
@@ -2351,7 +2384,9 @@ export class ChatwootService {
     content: string,
     mentionedJids: string[] | undefined,
   ): Promise<string> {
+    this.logger.verbose(`Formatting mentions: ${JSON.stringify(mentionedJids)}`);
     if (!content || !mentionedJids || mentionedJids.length === 0) {
+      this.logger.verbose(`No mentions to format`);
       return content;
     }
 
@@ -2359,24 +2394,32 @@ export class ChatwootService {
     const waInstance = this.waMonitor.waInstances[instance.instanceName];
 
     for (const jid of mentionedJids) {
+      this.logger.verbose(`Formatting mention: ${jid}`);
       try {
         // Extract the number from the JID (e.g., '192904228261983@lid' -> '192904228261983')
         const jidNumber = jid.split('@')[0].split(':')[0];
         const isLid = jid.endsWith('@lid');
 
-        if (!jidNumber) continue;
+        if (!jidNumber) {
+          this.logger.verbose(`No number found for mention: ${jid}`);
+          continue;
+        }
 
         let contactName: string | null = null;
         let chatwootContact: any = null;
         let phoneNumber: string | null = null;
 
         // 1. For LID JIDs, try to resolve the real phone number using Baileys
-        if (isLid && waInstance?.client?.signalRepository?.lidMapping) {
+        if (isLid && waInstance?.client?.signalRepository?.lidMapping?.getPNForLID) {
+          this.logger.verbose(`Resolving LID ${jid} to phone number`);
           try {
-            const resolvedPN = await waInstance.client.signalRepository.lidMapping.getPNForLID(jid);
-            if (resolvedPN) {
-              phoneNumber = resolvedPN.split('@')[0].split(':')[0];
-              this.logger.verbose(`Resolved LID ${jid} to phone number: ${phoneNumber}`);
+            const lidMapping = waInstance.client.signalRepository.lidMapping;
+            if (typeof lidMapping.getPNForLID === 'function') {
+              const resolvedPN = await lidMapping.getPNForLID(jid);
+              if (resolvedPN) {
+                phoneNumber = resolvedPN.split('@')[0].split(':')[0];
+                this.logger.verbose(`Resolved LID ${jid} to phone number: ${phoneNumber}`);
+              }
             }
           } catch (lidError) {
             this.logger.verbose(`Could not resolve LID ${jid}: ${lidError}`);
@@ -2384,37 +2427,77 @@ export class ChatwootService {
         }
 
         // 2. Try to find the contact in local database first
-        const localContact = await this.prismaRepository.contact.findFirst({
-          where: {
-            instanceId: waInstance?.instanceId,
-            OR: [
-              { remoteJid: jid },
-              { remoteJid: phoneNumber ? `${phoneNumber}@s.whatsapp.net` : undefined },
-            ].filter((condition) => condition.remoteJid !== undefined),
-          },
-        });
+        if (waInstance?.instanceId) {
+          this.logger.verbose(`Finding contact in local database: ${jid}`);
+          const orConditions: { remoteJid: string }[] = [{ remoteJid: jid }];
+          if (phoneNumber) {
+            orConditions.push({ remoteJid: `${phoneNumber}@s.whatsapp.net` });
+          }
 
-        if (localContact?.pushName) {
-          contactName = localContact.pushName;
-          this.logger.verbose(`Found contact name in local database: ${contactName}`);
+          const localContact = await this.prismaRepository.contact.findFirst({
+            where: {
+              instanceId: waInstance.instanceId,
+              OR: orConditions,
+            },
+          });
+
+          if (localContact?.pushName) {
+            contactName = localContact.pushName;
+            this.logger.verbose(`Found contact name in local database: ${contactName}`);
+          } else {
+            this.logger.verbose(`No contact name found in local database: ${jid}`);
+          }
         }
 
         // 3. Try to find the contact in Chatwoot
         // First try by identifier (full JID)
+        this.logger.verbose(`Finding contact in Chatwoot by identifier: ${jid}`);
         chatwootContact = await this.findContactByIdentifier(instance, jid);
 
         // If not found and we have a resolved phone number, try with that
         if (!chatwootContact && phoneNumber) {
+          this.logger.verbose(`Finding contact in Chatwoot by phone number: ${phoneNumber}`);
           chatwootContact = await this.findContact(instance, phoneNumber);
         }
 
         // If still not found, try with the JID number directly
         if (!chatwootContact) {
-          chatwootContact = await this.findContactByIdentifier(instance, jidNumber);
+          this.logger.verbose(`Finding contact in Chatwoot by JID number: ${jidNumber}`);
+          chatwootContact = await this.findContact(instance, jidNumber);
+        }
+
+        // 4. If contact not found in Chatwoot but we have name and phone number, create it
+        if (!chatwootContact && contactName && jid) {
+          try {
+            const filterInbox = await this.getInbox(instance);
+            if (filterInbox) {
+              const contactPhone = phoneNumber || jidNumber;
+
+              this.logger.verbose(`Creating Chatwoot contact for mention: ${contactName} (${contactPhone})`);
+
+              const newContact = await this.createContact(
+                instance,
+                contactPhone,
+                filterInbox.id,
+                false,
+                contactName,
+                null,
+                jid,
+              );
+
+              if (newContact) {
+                chatwootContact = newContact;
+                this.logger.verbose(`Created Chatwoot contact for mention: ID ${chatwootContact?.id}`);
+              }
+            }
+          } catch (createError) {
+            this.logger.error(`Error creating Chatwoot contact for mention: ${createError}`);
+          }
         }
 
         // Use Chatwoot contact name if available, otherwise use local contact name
         if (chatwootContact?.name) {
+          this.logger.verbose(`Using Chatwoot contact name: ${chatwootContact.name} - ID: ${chatwootContact.id}`);
           contactName = chatwootContact.name;
         }
 
@@ -2615,6 +2698,8 @@ export class ChatwootService {
                 if (!isParticipantInGroup) {
                   this.logger.verbose(`Adding participant ${participantSenderId} to group conversation ${getConversation}`);
                   await this.addGroupContacts(instance, getConversation, [participantSenderId]);
+                } else {
+                  this.logger.verbose(`Participant ${participantSenderId} already in group conversation ${getConversation}`);
                 }
               }
             }
@@ -2790,17 +2875,31 @@ export class ChatwootService {
             body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
               ? body.key.participantAlt.split('@')[0].split(':')[0]
               : body.key.participant.split('@')[0].split(':')[0];
-          const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
-
           const content = bodyMessage || '';
 
           // Find participant contact to get sender_id for group message
           let participantSenderId: number | undefined;
-          if (!body.key.fromMe && rawPhoneNumber) {
-            const participantContact = await this.findContact(instance, rawPhoneNumber);
+          if (rawPhoneNumber) {
+            let participantContact = await this.findContact(instance, rawPhoneNumber);
+
+            if (!participantContact) {
+              this.logger.verbose(`Participant contact not found for phone number: ${rawPhoneNumber}, searching by identifier: ${body.key.participant}`);
+              const contactJid = body.key.participant.endsWith('@lid') ? body.key.participant : body.key.participantAlt?.endsWith('@lid') ? body.key.participantAlt : null;
+              if (contactJid) {
+                participantContact = await this.findContactByIdentifier(instance, contactJid);
+              }
+            }
+
             if (participantContact) {
               participantSenderId = participantContact.id;
               this.logger.verbose(`Found participant contact for group text message: ID:${participantSenderId}`);
+
+              if (participantContact.name !== rawPhoneNumber) {
+                this.logger.verbose(`Updating participant contact name: ${participantName} - ID:${participantSenderId}`);
+                await this.updateContact(instance, participantSenderId, {
+                  name: participantName,
+                });
+              }
 
               // Ensure participant is added to the group conversation before sending message
               const groupContacts = await this.getGroupContacts(instance, getConversation);
@@ -3031,9 +3130,10 @@ export class ChatwootService {
         if (action === 'add') {
           // Get full group metadata to sync all participants
           try {
-            const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(groupId);
-            if (group?.participants) {
-              this.syncGroupParticipants(instance, conversationId, filterInbox.id, group.participants).catch((err) =>
+            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: groupId });
+            this.logger.verbose(`Group ${groupId} participants: ${JSON.stringify(participants)}`);
+            if (participants?.participants?.length > 0) {
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch((err) =>
                 this.logger.error(`Error syncing group participants after add: ${err}`),
               );
             }
@@ -3043,13 +3143,14 @@ export class ChatwootService {
         } else if (action === 'remove') {
           // For remove, we also sync to update the group contacts list
           try {
-            const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(groupId);
-            if (group?.participants) {
+            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: groupId });
+            this.logger.verbose(`Group ${groupId} participants: ${JSON.stringify(participants)}`);
+            if (participants?.participants?.length > 0) {
               // Clear the sync cache to force a fresh sync
               const syncCacheKey = `${instance.instanceName}:syncGroupParticipants-${conversationId}`;
               await this.cache.delete(syncCacheKey);
 
-              this.syncGroupParticipants(instance, conversationId, filterInbox.id, group.participants).catch((err) =>
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch((err) =>
                 this.logger.error(`Error syncing group participants after remove: ${err}`),
               );
             }
