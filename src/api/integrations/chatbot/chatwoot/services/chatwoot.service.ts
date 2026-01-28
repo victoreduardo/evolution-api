@@ -2340,6 +2340,110 @@ export class ChatwootService {
     return messageContent;
   }
 
+  /**
+   * Formats mentions in a message content by replacing JIDs with Chatwoot mention format.
+   * Converts @<jid_number> to [@<contact_name>](mention://contact/<contact_id>/<contact_name>)
+   *
+   * For LID JIDs (@lid), attempts to resolve the real phone number using Baileys signalRepository.
+   */
+  private async formatMentions(
+    instance: InstanceDto,
+    content: string,
+    mentionedJids: string[] | undefined,
+  ): Promise<string> {
+    if (!content || !mentionedJids || mentionedJids.length === 0) {
+      return content;
+    }
+
+    let formattedContent = content;
+    const waInstance = this.waMonitor.waInstances[instance.instanceName];
+
+    for (const jid of mentionedJids) {
+      try {
+        // Extract the number from the JID (e.g., '192904228261983@lid' -> '192904228261983')
+        const jidNumber = jid.split('@')[0].split(':')[0];
+        const isLid = jid.endsWith('@lid');
+
+        if (!jidNumber) continue;
+
+        let contactName: string | null = null;
+        let chatwootContact: any = null;
+        let phoneNumber: string | null = null;
+
+        // 1. For LID JIDs, try to resolve the real phone number using Baileys
+        if (isLid && waInstance?.client?.signalRepository?.lidMapping) {
+          try {
+            const resolvedPN = await waInstance.client.signalRepository.lidMapping.getPNForLID(jid);
+            if (resolvedPN) {
+              phoneNumber = resolvedPN.split('@')[0].split(':')[0];
+              this.logger.verbose(`Resolved LID ${jid} to phone number: ${phoneNumber}`);
+            }
+          } catch (lidError) {
+            this.logger.verbose(`Could not resolve LID ${jid}: ${lidError}`);
+          }
+        }
+
+        // 2. Try to find the contact in local database first
+        const localContact = await this.prismaRepository.contact.findFirst({
+          where: {
+            instanceId: waInstance?.instanceId,
+            OR: [
+              { remoteJid: jid },
+              { remoteJid: phoneNumber ? `${phoneNumber}@s.whatsapp.net` : undefined },
+            ].filter((condition) => condition.remoteJid !== undefined),
+          },
+        });
+
+        if (localContact?.pushName) {
+          contactName = localContact.pushName;
+          this.logger.verbose(`Found contact name in local database: ${contactName}`);
+        }
+
+        // 3. Try to find the contact in Chatwoot
+        // First try by identifier (full JID)
+        chatwootContact = await this.findContactByIdentifier(instance, jid);
+
+        // If not found and we have a resolved phone number, try with that
+        if (!chatwootContact && phoneNumber) {
+          chatwootContact = await this.findContact(instance, phoneNumber);
+        }
+
+        // If still not found, try with the JID number directly
+        if (!chatwootContact) {
+          chatwootContact = await this.findContactByIdentifier(instance, jidNumber);
+        }
+
+        // Use Chatwoot contact name if available, otherwise use local contact name
+        if (chatwootContact?.name) {
+          contactName = chatwootContact.name;
+        }
+
+        if (contactName && chatwootContact?.id) {
+          // Replace @<jid_number> with Chatwoot mention format
+          // The pattern matches @<number> in the message content
+          const mentionPattern = new RegExp(`@${jidNumber}\\b`, 'g');
+          const chatwootMention = `[@${contactName}](mention://contact/${chatwootContact.id}/${encodeURIComponent(contactName)})`;
+          formattedContent = formattedContent.replace(mentionPattern, chatwootMention);
+
+          this.logger.verbose(`Formatted mention: @${jidNumber} -> ${chatwootMention}`);
+        } else if (contactName) {
+          // If we have a name but no Chatwoot contact ID, just replace with the name
+          const mentionPattern = new RegExp(`@${jidNumber}\\b`, 'g');
+          formattedContent = formattedContent.replace(mentionPattern, `@${contactName}`);
+
+          this.logger.verbose(`Formatted mention with name only: @${jidNumber} -> @${contactName}`);
+        } else {
+          this.logger.verbose(`Contact not found for mention JID: ${jid}, keeping original @${jidNumber}`);
+        }
+      } catch (error) {
+        this.logger.error(`Error formatting mention for JID ${jid}: ${error}`);
+        // Continue with other mentions even if one fails
+      }
+    }
+
+    return formattedContent;
+  }
+
   public async eventWhatsapp(event: string, instance: InstanceDto, body: any) {
     try {
       const waInstance = this.waMonitor.waInstances[instance.instanceName];
@@ -2399,12 +2503,22 @@ export class ChatwootService {
         }
 
         const originalMessage = await this.getConversationMessage(body.message);
-        const bodyMessage = originalMessage
+        let bodyMessage = originalMessage
           ? originalMessage
             .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
             .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
             .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
           : originalMessage;
+
+        // Format mentions if present in the message
+        const mentionedJids =
+          body.contextInfo?.mentionedJid ||
+          body.message?.extendedTextMessage?.contextInfo?.mentionedJid ||
+          body.message?.contextInfo?.mentionedJid;
+
+        if (bodyMessage && mentionedJids && mentionedJids.length > 0) {
+          bodyMessage = await this.formatMentions(instance, bodyMessage, mentionedJids);
+        }
 
         if (bodyMessage && bodyMessage.includes('/survey/responses/') && bodyMessage.includes('http')) {
           return;
