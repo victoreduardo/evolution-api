@@ -3456,7 +3456,7 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
-  public async contactMessage(data: SendContactDto) {
+  public async contactMessage(data: SendContactDto, isIntegration = false) {
     const message: proto.IMessage = {};
 
     const vcard = (contact: ContactMessage) => {
@@ -3494,7 +3494,7 @@ export class BaileysStartupService extends ChannelStartupService {
       };
     }
 
-    return await this.sendMessageWithTyping(data.number, { ...message }, {});
+    return await this.sendMessageWithTyping(data.number, { ...message }, {}, isIntegration);
   }
 
   public async reactionMessage(data: SendReactionDto) {

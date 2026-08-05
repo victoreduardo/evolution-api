@@ -1903,15 +1903,18 @@ export class ChatwootService {
 
               const messageSent =
                 attachment.file_type === 'contact'
-                  ? await waInstance?.contactMessage({
-                      number: chatId,
-                      contact: [
-                        {
-                          fullName: attachment.meta?.name || attachment.fallback_title,
-                          phoneNumber: attachment.fallback_title,
-                        } as ContactMessage,
-                      ],
-                    } as SendContactDto)
+                  ? await waInstance?.contactMessage(
+                      {
+                        number: chatId,
+                        contact: [
+                          {
+                            fullName: attachment.meta?.name || attachment.fallback_title,
+                            phoneNumber: attachment.fallback_title,
+                          } as ContactMessage,
+                        ],
+                      } as SendContactDto,
+                      true,
+                    )
                   : await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id);
