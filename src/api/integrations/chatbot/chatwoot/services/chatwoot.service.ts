@@ -1,5 +1,5 @@
 import { InstanceDto } from '@api/dto/instance.dto';
-import { Options, Quoted, SendAudioDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
+import { ContactMessage, Options, Quoted, SendAudioDto, SendContactDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
@@ -1901,13 +1901,18 @@ export class ChatwootService {
                 quoted: await this.getQuotedMessage(body, instance),
               };
 
-              const messageSent = await this.sendAttachment(
-                waInstance,
-                chatId,
-                attachment.data_url,
-                formatText,
-                options,
-              );
+              const messageSent =
+                attachment.file_type === 'contact'
+                  ? await waInstance?.contactMessage({
+                      number: chatId,
+                      contact: [
+                        {
+                          fullName: attachment.meta?.name || attachment.fallback_title,
+                          phoneNumber: attachment.fallback_title,
+                        } as ContactMessage,
+                      ],
+                    } as SendContactDto)
+                  : await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id);
               }
