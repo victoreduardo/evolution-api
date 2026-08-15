@@ -52,6 +52,10 @@ import {
   StatusMessage,
   TypeButton,
 } from '@api/dto/sendMessage.dto';
+import {
+  enqueueChatwootEvent,
+  isChatwootForwardQueueAvailable,
+} from '@api/integrations/chatbot/chatwoot/queues/chatwoot-forward.queue';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
@@ -1124,11 +1128,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
           if (editedMessage) {
             if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled)
-              this.chatwootService.eventWhatsapp(
-                'messages.edit',
-                { instanceName: this.instance.name, instanceId: this.instance.id },
-                editedMessage,
-              );
+              await this.dispatchChatwootEvent('messages.edit', editedMessage);
 
             await this.sendDataWebhook(Events.MESSAGES_EDITED, editedMessage);
 
@@ -1323,23 +1323,10 @@ export class BaileysStartupService extends ChannelStartupService {
             await this.client.readMessages([received.key]);
           }
 
-          if (
+          const shouldForwardToChatwoot =
             this.configService.get<Chatwoot>('CHATWOOT').ENABLED &&
             this.localChatwoot?.enabled &&
-            !received.key.id.includes('@broadcast')
-          ) {
-            const chatwootSentMessage = await this.chatwootService.eventWhatsapp(
-              Events.MESSAGES_UPSERT,
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              messageRaw,
-            );
-
-            if (chatwootSentMessage?.id) {
-              messageRaw.chatwootMessageId = chatwootSentMessage.id;
-              messageRaw.chatwootInboxId = chatwootSentMessage.inbox_id;
-              messageRaw.chatwootConversationId = chatwootSentMessage.conversation_id;
-            }
-          }
+            !received.key.id.includes('@broadcast');
 
           if (this.configService.get<Openai>('OPENAI').ENABLED && received?.message?.audioMessage) {
             const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
@@ -1356,6 +1343,20 @@ export class BaileysStartupService extends ChannelStartupService {
             // eslint-disable-next-line @typescript-eslint/no-unused-vars
             const { pollUpdates, ...messageData } = messageRaw;
             const msg = await this.prismaRepository.message.create({ data: messageData });
+
+            if (shouldForwardToChatwoot) {
+              const chatwootSentMessage = await this.dispatchChatwootEvent(Events.MESSAGES_UPSERT, messageRaw, msg.id);
+              if (chatwootSentMessage?.id) {
+                await this.prismaRepository.message.update({
+                  where: { id: msg.id },
+                  data: {
+                    chatwootMessageId: chatwootSentMessage.id,
+                    chatwootInboxId: chatwootSentMessage.inbox_id,
+                    chatwootConversationId: chatwootSentMessage.conversation_id,
+                  },
+                });
+              }
+            }
 
             const { remoteJid } = received.key;
             const timestamp = msg.messageTimestamp;
@@ -1439,6 +1440,8 @@ export class BaileysStartupService extends ChannelStartupService {
                 }
               }
             }
+          } else if (shouldForwardToChatwoot) {
+            await this.dispatchChatwootEvent(Events.MESSAGES_UPSERT, messageRaw);
           }
 
           if (this.localWebhook.enabled) {
@@ -1588,11 +1591,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
         if (status[update.status] === 'READ' && key.fromMe) {
           if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-            this.chatwootService.eventWhatsapp(
-              'messages.read',
-              { instanceName: this.instance.name, instanceId: this.instanceId },
-              { key: key },
-            );
+            await this.dispatchChatwootEvent('messages.read', { key: key });
           }
         }
 
@@ -1659,11 +1658,7 @@ export class BaileysStartupService extends ChannelStartupService {
               await this.prismaRepository.messageUpdate.create({ data: message });
 
             if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled) {
-              this.chatwootService.eventWhatsapp(
-                Events.MESSAGES_DELETE,
-                { instanceName: this.instance.name, instanceId: this.instanceId },
-                { key: key },
-              );
+              await this.dispatchChatwootEvent(Events.MESSAGES_DELETE, { key: key });
             }
 
             continue;
@@ -4647,6 +4642,25 @@ export class BaileysStartupService extends ChannelStartupService {
     }
 
     return obj;
+  }
+
+  private async dispatchChatwootEvent(event: string, body: any, messageDbId?: string): Promise<any> {
+    if (isChatwootForwardQueueAvailable()) {
+      await enqueueChatwootEvent({
+        event,
+        instanceName: this.instance.name,
+        instanceId: this.instanceId,
+        body,
+        messageDbId,
+      });
+      return null; // no synchronous result when queued — callers must not depend on it
+    }
+
+    return this.chatwootService.eventWhatsapp(
+      event,
+      { instanceName: this.instance.name, instanceId: this.instanceId },
+      body,
+    );
   }
 
   private prepareMessage(message: proto.IWebMessageInfo): any {
