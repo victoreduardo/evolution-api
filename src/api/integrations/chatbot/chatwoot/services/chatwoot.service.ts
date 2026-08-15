@@ -33,7 +33,7 @@ import mimeTypes from 'mime-types';
 import path from 'path';
 import { Readable } from 'stream';
 
-interface ChatwootMessage {
+export interface ChatwootMessage {
   messageId?: number;
   inboxId?: number;
   conversationId?: number;
@@ -2040,7 +2040,7 @@ export class ChatwootService {
     }
   }
 
-  private async updateChatwootMessageId(
+  public async updateChatwootMessageId(
     message: MessageModel,
     chatwootMessageIds: ChatwootMessage,
     instance: InstanceDto,
