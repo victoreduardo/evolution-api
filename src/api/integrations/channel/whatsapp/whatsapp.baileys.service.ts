@@ -2335,16 +2335,61 @@ export class BaileysStartupService extends ChannelStartupService {
 
       const linkPreview = options?.linkPreview != false ? undefined : false;
 
+      // Parallelize independent operations: quoted message fetch and group metadata
       let quoted: WAMessage;
+      let group: any = null;
+      const isGroup = isJidGroup(sender);
 
+      // Prepare parallel operations
+      const parallelOps: Promise<any>[] = [];
+
+      // Fetch quoted message if needed
       if (options?.quoted) {
         const m = options?.quoted;
-
-        const msg = m?.message ? m : ((await this.getMessage(m.key, true)) as WAMessage);
-
-        if (msg) {
-          quoted = msg;
+        if (m?.message) {
+          quoted = m;
+        } else {
+          parallelOps.push(
+            this.getMessage(m.key, true)
+              .then((msg) => {
+                quoted = msg as WAMessage;
+              })
+              .catch((error) => {
+                this.logger.warn(['Error fetching quoted message:', error]);
+              }),
+          );
         }
+      }
+
+      // Fetch group metadata if it's a group
+      if (isGroup) {
+        const cache = this.configService.get<CacheConf>('CACHE');
+        if (!cache.REDIS.ENABLED && !cache.LOCAL.ENABLED) {
+          parallelOps.push(
+            this.findGroup({ groupJid: sender }, 'inner')
+              .then((g) => {
+                group = g;
+              })
+              .catch(() => {
+                throw new NotFoundException('Group not found');
+              }),
+          );
+        } else {
+          parallelOps.push(
+            this.getGroupMetadataCache(sender)
+              .then((g) => {
+                group = g;
+              })
+              .catch(() => {
+                throw new NotFoundException('Group not found');
+              }),
+          );
+        }
+      }
+
+      // Execute parallel operations
+      if (parallelOps.length > 0) {
+        await Promise.all(parallelOps);
       }
 
       let messageSent: WAMessage;
@@ -2352,17 +2397,7 @@ export class BaileysStartupService extends ChannelStartupService {
       let mentions: string[];
       let contextInfo: any;
 
-      if (isJidGroup(sender)) {
-        let group;
-        try {
-          const cache = this.configService.get<CacheConf>('CACHE');
-          if (!cache.REDIS.ENABLED && !cache.LOCAL.ENABLED) group = await this.findGroup({ groupJid: sender }, 'inner');
-          else group = await this.getGroupMetadataCache(sender);
-          // group = await this.findGroup({ groupJid: sender }, 'inner');
-        } catch {
-          throw new NotFoundException('Group not found');
-        }
-
+      if (isGroup) {
         if (!group) {
           throw new NotFoundException('Group not found');
         }
@@ -2419,7 +2454,7 @@ export class BaileysStartupService extends ChannelStartupService {
 
       const messageRaw = this.prepareMessage(messageSent);
 
-      const isMedia =
+      const isMedia = !!(
         messageSent?.message?.imageMessage ||
         messageSent?.message?.videoMessage ||
         messageSent?.message?.stickerMessage ||
@@ -2427,83 +2462,124 @@ export class BaileysStartupService extends ChannelStartupService {
         messageSent?.message?.documentMessage ||
         messageSent?.message?.documentWithCaptionMessage ||
         messageSent?.message?.ptvMessage ||
-        messageSent?.message?.audioMessage;
+        messageSent?.message?.audioMessage
+      );
 
+      // Send webhook immediately (critical for real-time feedback)
+      this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
+
+      // Process non-critical operations asynchronously (don't block response)
+      this.processMessageAsync(messageRaw, messageSent, isMedia, isIntegration).catch((error) => {
+        this.logger.error(['Error processing message async:', error]);
+      });
+
+      // Return immediately after sending message and webhook
+      return messageRaw;
+    } catch (error) {
+      this.logger.error(error);
+      throw new BadRequestException(error.toString());
+    }
+  }
+
+  /**
+   * Process non-critical operations asynchronously after message is sent
+   * This method runs in background and doesn't block the response
+   */
+  private async processMessageAsync(
+    messageRaw: any,
+    messageSent: any,
+    isMedia: boolean,
+    isIntegration: boolean,
+  ): Promise<void> {
+    try {
       const isVideo = messageSent?.message?.videoMessage;
 
+      // 1. Chatwoot integration (non-critical)
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
-        this.chatwootService.eventWhatsapp(
-          Events.SEND_MESSAGE,
-          { instanceName: this.instance.name, instanceId: this.instanceId },
-          messageRaw,
-        );
+        this.chatwootService
+          .eventWhatsapp(Events.SEND_MESSAGE, { instanceName: this.instance.name, instanceId: this.instanceId }, messageRaw)
+          .catch((error) => {
+            this.logger.error(['Error sending to Chatwoot:', error]);
+          });
       }
 
+      // 2. OpenAI speech-to-text (non-critical)
       if (this.configService.get<Openai>('OPENAI').ENABLED && messageRaw?.message?.audioMessage) {
-        const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
-          where: { instanceId: this.instanceId },
-          include: { OpenaiCreds: true },
-        });
+        try {
+          const openAiDefaultSettings = await this.prismaRepository.openaiSetting.findFirst({
+            where: { instanceId: this.instanceId },
+            include: { OpenaiCreds: true },
+          });
 
-        if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
-          messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(messageRaw, this)}`;
+          if (openAiDefaultSettings && openAiDefaultSettings.openaiCredsId && openAiDefaultSettings.speechToText) {
+            messageRaw.message.speechToText = `[audio] ${await this.openaiService.speechToText(messageRaw, this)}`;
+          }
+        } catch (error) {
+          this.logger.error(['Error processing OpenAI speech-to-text:', error]);
         }
       }
 
+      // 3. Save to database (non-critical for response)
       if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
-        const msg = await this.prismaRepository.message.create({ data: messageRaw });
+        try {
+          const msg = await this.prismaRepository.message.create({ data: messageRaw });
 
-        if (isMedia && this.configService.get<S3>('S3').ENABLE) {
-          try {
-            if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
-              throw new Error('Video upload is disabled.');
-            }
-
-            const message: any = messageRaw;
-
-            // Verificação adicional para garantir que há conteúdo de mídia real
-            const hasRealMedia = this.hasValidMediaContent(message);
-
-            if (!hasRealMedia) {
-              this.logger.warn('Message detected as media but contains no valid media content');
-            } else {
-              const media = await this.getBase64FromMediaMessage({ message }, true);
-
-              if (!media) {
-                this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
-                return;
+          // 4. Upload media to S3/MinIO (non-critical)
+          if (isMedia && this.configService.get<S3>('S3').ENABLE) {
+            try {
+              if (isVideo && !this.configService.get<S3>('S3').SAVE_VIDEO) {
+                throw new Error('Video upload is disabled.');
               }
 
-              const { buffer, mediaType, fileName, size } = media;
+              const message: any = messageRaw;
 
-              const mimetype = mimeTypes.lookup(fileName).toString();
+              // Verificação adicional para garantir que há conteúdo de mídia real
+              const hasRealMedia = this.hasValidMediaContent(message);
 
-              const fullName = join(
-                `${this.instance.id}`,
-                messageRaw.key.remoteJid,
-                `${messageRaw.key.id}`,
-                mediaType,
-                fileName,
-              );
+              if (!hasRealMedia) {
+                this.logger.warn('Message detected as media but contains no valid media content');
+              } else {
+                const media = await this.getBase64FromMediaMessage({ message }, true);
 
-              await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
+                if (!media) {
+                  this.logger.verbose('No valid media to upload (messageContextInfo only), skipping MinIO');
+                  return;
+                }
 
-              await this.prismaRepository.media.create({
-                data: { messageId: msg.id, instanceId: this.instanceId, type: mediaType, fileName: fullName, mimetype },
-              });
+                const { buffer, mediaType, fileName, size } = media;
 
-              const mediaUrl = await s3Service.getObjectUrl(fullName);
+                const mimetype = mimeTypes.lookup(fileName).toString();
 
-              messageRaw.message.mediaUrl = mediaUrl;
+                const fullName = join(
+                  `${this.instance.id}`,
+                  messageRaw.key.remoteJid,
+                  `${messageRaw.key.id}`,
+                  mediaType,
+                  fileName,
+                );
 
-              await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+                await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
+
+                await this.prismaRepository.media.create({
+                  data: { messageId: msg.id, instanceId: this.instanceId, type: mediaType, fileName: fullName, mimetype },
+                });
+
+                const mediaUrl = await s3Service.getObjectUrl(fullName);
+
+                messageRaw.message.mediaUrl = mediaUrl;
+
+                await this.prismaRepository.message.update({ where: { id: msg.id }, data: messageRaw });
+              }
+            } catch (error) {
+              this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
             }
-          } catch (error) {
-            this.logger.error(['Error on upload file to minio', error?.message, error?.stack]);
           }
+        } catch (error) {
+          this.logger.error(['Error saving message to database:', error]);
         }
       }
 
+      // 5. Webhook base64 for media (non-critical)
       if (this.localWebhook.enabled) {
         if (isMedia && this.localWebhook.webhookBase64) {
           try {
@@ -2535,24 +2611,22 @@ export class BaileysStartupService extends ChannelStartupService {
         }
       }
 
-      this.logger.verbose(messageSent);
-
-      this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
-
+      // 6. Chatwoot integration for chatbot (non-critical)
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && isIntegration) {
-        await chatbotController.emit({
-          instance: { instanceName: this.instance.name, instanceId: this.instanceId },
-          remoteJid: messageRaw.key.remoteJid,
-          msg: messageRaw,
-          pushName: messageRaw.pushName,
-          isIntegration,
-        });
+        chatbotController
+          .emit({
+            instance: { instanceName: this.instance.name, instanceId: this.instanceId },
+            remoteJid: messageRaw.key.remoteJid,
+            msg: messageRaw,
+            pushName: messageRaw.pushName,
+            isIntegration,
+          })
+          .catch((error) => {
+            this.logger.error(['Error emitting chatbot event:', error]);
+          });
       }
-
-      return messageRaw;
     } catch (error) {
-      this.logger.error(error);
-      throw new BadRequestException(error.toString());
+      this.logger.error(['Error in processMessageAsync:', error]);
     }
   }
 
@@ -3500,6 +3574,14 @@ export class BaileysStartupService extends ChannelStartupService {
 
   // Chat Controller
   public async whatsappNumber(data: WhatsAppNumberDto) {
+    // Check cache first for quick validation (5 minute TTL)
+    const cacheKey = `whatsapp_number:${this.instanceId}:${data.numbers.sort().join(',')}`;
+    const cachedResult = await this.baileysCache.get(cacheKey);
+    if (cachedResult) {
+      this.logger.verbose(`WhatsApp number validation cache hit for ${data.numbers.length} numbers`);
+      return cachedResult as OnWhatsAppDto[];
+    }
+
     const jids: {
       groups: { number: string; jid: string }[];
       broadcast: { number: string; jid: string }[];
@@ -3558,7 +3640,8 @@ export class BaileysStartupService extends ChannelStartupService {
 
     if (normalNumbersNotInCache.length > 0) {
       this.logger.verbose(`Checking ${normalNumbersNotInCache.length} numbers via Baileys (not found in cache)`);
-      verify = await this.client.onWhatsApp(...normalNumbersNotInCache);
+      const verifyResult = await this.client.onWhatsApp(...normalNumbersNotInCache);
+      verify = verifyResult.map((v) => ({ jid: v.jid, exists: Boolean(v.exists) }));
     }
 
     const verifiedUsers = await Promise.all(
@@ -3664,6 +3747,9 @@ export class BaileysStartupService extends ChannelStartupService {
         })),
       );
     }
+
+    // Cache result for 5 minutes to avoid repeated validations
+    await this.baileysCache.set(cacheKey, onWhatsapp, 5 * 60);
 
     return onWhatsapp;
   }

@@ -51,6 +51,11 @@ export type SaveData = {
 export type DBConnection = {
   URI: string;
   CLIENT_NAME: string;
+  POOL?: {
+    MAX_CONNECTIONS?: number;
+    MIN_CONNECTIONS?: number;
+    CONNECTION_TIMEOUT?: number;
+  };
 };
 export type Database = {
   CONNECTION: DBConnection;
@@ -493,6 +498,11 @@ export class ConfigService {
         CONNECTION: {
           URI: process.env.DATABASE_CONNECTION_URI || '',
           CLIENT_NAME: process.env.DATABASE_CONNECTION_CLIENT_NAME || 'evolution',
+          POOL: {
+            MAX_CONNECTIONS: Number.parseInt(process.env.DATABASE_POOL_MAX_CONNECTIONS || '20'),
+            MIN_CONNECTIONS: Number.parseInt(process.env.DATABASE_POOL_MIN_CONNECTIONS || '5'),
+            CONNECTION_TIMEOUT: Number.parseInt(process.env.DATABASE_POOL_TIMEOUT || '10000'),
+          },
         },
         PROVIDER: process.env.DATABASE_PROVIDER || 'postgresql',
         SAVE_DATA: {
