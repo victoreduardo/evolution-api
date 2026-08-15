@@ -23,9 +23,12 @@ export type LogBaileys = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace'
 
 export type LogLevel = 'ERROR' | 'WARN' | 'DEBUG' | 'INFO' | 'LOG' | 'VERBOSE' | 'DARK' | 'WEBHOOKS' | 'WEBSOCKET';
 
+export type LogFormat = 'pretty' | 'json';
+
 export type Log = {
   LEVEL: LogLevel[];
   COLOR: boolean;
+  FORMAT: LogFormat;
   BAILEYS: LogBaileys;
 };
 
@@ -735,6 +738,7 @@ export class ConfigService {
           (process.env?.LOG_LEVEL?.split(',') as LogLevel[]) ||
           (['ERROR', 'WARN', 'DEBUG', 'INFO', 'LOG', 'VERBOSE', 'DARK', 'WEBHOOKS', 'WEBSOCKET'] as LogLevel[]),
         COLOR: process.env?.LOG_COLOR === 'true',
+        FORMAT: (process.env?.LOG_FORMAT as LogFormat) || 'pretty',
         BAILEYS: (process.env?.LOG_BAILEYS as LogBaileys) || 'error',
       },
       DEL_INSTANCE: isBooleanString(process.env?.DEL_INSTANCE)

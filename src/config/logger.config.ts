@@ -10,6 +10,18 @@ const formatDateLog = (timestamp: number) =>
     .toString()
     .replace(/\sGMT.+/, '');
 
+const serializeValue = (value: any) => {
+  if (value instanceof Error) {
+    return { name: value.name, message: value.message, stack: value.stack };
+  }
+  try {
+    JSON.stringify(value);
+    return value;
+  } catch {
+    return String(value);
+  }
+};
+
 enum Color {
   LOG = '\x1b[32m',
   INFO = '\x1b[34m',
@@ -81,7 +93,19 @@ export class Logger {
 
     const typeValue = typeof value;
     if (types.includes(type)) {
-      if (configService.get<Log>('LOG').COLOR) {
+      if (configService.get<Log>('LOG').FORMAT === 'json') {
+        console.log(
+          JSON.stringify({
+            timestamp: new Date().toISOString(),
+            level: type,
+            context: this.context,
+            instance: this.instance || undefined,
+            pid: process.pid,
+            version: packageJson.version,
+            message: serializeValue(value),
+          }),
+        );
+      } else if (configService.get<Log>('LOG').COLOR) {
         console.log(
           /*Command.UNDERSCORE +*/ Command.BRIGHT + Level[type],
           '[Evolution API]',
