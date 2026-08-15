@@ -329,6 +329,14 @@ export type Chatwoot = {
     PLACEHOLDER_MEDIA_MESSAGE: boolean;
   };
 };
+export type BullMQConfig = {
+  ENABLED: boolean;
+  QUEUES: {
+    WA_INBOUND: { CONCURRENCY: number };
+    CHATWOOT_FORWARD: { CONCURRENCY: number; ATTEMPTS: number; TIMEOUT_MS: number };
+    WA_OUTBOUND: { CONCURRENCY: number; ATTEMPTS: number; TIMEOUT_MS: number };
+  };
+};
 export type Openai = { ENABLED: boolean; API_KEY_GLOBAL?: string };
 export type Dify = { ENABLED: boolean };
 export type N8n = { ENABLED: boolean };
@@ -413,6 +421,7 @@ export interface Env {
   QRCODE: QrCode;
   TYPEBOT: Typebot;
   CHATWOOT: Chatwoot;
+  BULLMQ: BullMQConfig;
   OPENAI: Openai;
   DIFY: Dify;
   N8N: N8n;
@@ -821,6 +830,24 @@ export class ConfigService {
             },
           },
           PLACEHOLDER_MEDIA_MESSAGE: process.env?.CHATWOOT_IMPORT_PLACEHOLDER_MEDIA_MESSAGE === 'true',
+        },
+      },
+      BULLMQ: {
+        ENABLED: process.env?.BULLMQ_ENABLED === 'true',
+        QUEUES: {
+          WA_INBOUND: {
+            CONCURRENCY: Number.parseInt(process.env?.BULLMQ_WA_INBOUND_CONCURRENCY) || 10,
+          },
+          CHATWOOT_FORWARD: {
+            CONCURRENCY: Number.parseInt(process.env?.BULLMQ_CHATWOOT_FORWARD_CONCURRENCY) || 5,
+            ATTEMPTS: Number.parseInt(process.env?.BULLMQ_CHATWOOT_FORWARD_ATTEMPTS) || 5,
+            TIMEOUT_MS: Number.parseInt(process.env?.BULLMQ_CHATWOOT_FORWARD_TIMEOUT_MS) || 30000,
+          },
+          WA_OUTBOUND: {
+            CONCURRENCY: Number.parseInt(process.env?.BULLMQ_WA_OUTBOUND_CONCURRENCY) || 5,
+            ATTEMPTS: Number.parseInt(process.env?.BULLMQ_WA_OUTBOUND_ATTEMPTS) || 3,
+            TIMEOUT_MS: Number.parseInt(process.env?.BULLMQ_WA_OUTBOUND_TIMEOUT_MS) || 60000,
+          },
         },
       },
       OPENAI: {
