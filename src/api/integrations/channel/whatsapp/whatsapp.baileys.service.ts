@@ -157,6 +157,7 @@ import { PassThrough, Readable } from 'stream';
 import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
+import { enqueueWaInbound, isWaInboundQueueAvailable } from './queues/wa-inbound.queue';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -1867,6 +1868,18 @@ export class BaileysStartupService extends ChannelStartupService {
     },
   };
 
+  public async processInboundEvent(
+    type: 'messages.upsert' | 'messages.update',
+    payload: any,
+    settings: any,
+  ): Promise<void> {
+    if (type === 'messages.upsert') {
+      await this.messageHandle['messages.upsert'](payload, settings);
+    } else {
+      await this.messageHandle['messages.update'](payload, settings);
+    }
+  }
+
   private eventHandler() {
     this.client.ev.process(async (events) => {
       this.eventProcessingQueue = this.eventProcessingQueue.then(async () => {
@@ -1910,13 +1923,31 @@ export class BaileysStartupService extends ChannelStartupService {
             if (events['messages.upsert']) {
               const payload = events['messages.upsert'];
 
-              // this.messageProcessor.processMessage(payload, settings);
-              await this.messageHandle['messages.upsert'](payload, settings);
+              if (isWaInboundQueueAvailable()) {
+                await enqueueWaInbound({
+                  type: 'messages.upsert',
+                  instanceName: this.instance.name,
+                  payload,
+                  settings,
+                });
+              } else {
+                await this.messageHandle['messages.upsert'](payload, settings);
+              }
             }
 
             if (events['messages.update']) {
               const payload = events['messages.update'];
-              await this.messageHandle['messages.update'](payload, settings);
+
+              if (isWaInboundQueueAvailable()) {
+                await enqueueWaInbound({
+                  type: 'messages.update',
+                  instanceName: this.instance.name,
+                  payload,
+                  settings,
+                });
+              } else {
+                await this.messageHandle['messages.update'](payload, settings);
+              }
             }
 
             if (events['message-receipt.update']) {
@@ -2497,7 +2528,11 @@ export class BaileysStartupService extends ChannelStartupService {
       // 1. Chatwoot integration (non-critical)
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
         this.chatwootService
-          .eventWhatsapp(Events.SEND_MESSAGE, { instanceName: this.instance.name, instanceId: this.instanceId }, messageRaw)
+          .eventWhatsapp(
+            Events.SEND_MESSAGE,
+            { instanceName: this.instance.name, instanceId: this.instanceId },
+            messageRaw,
+          )
           .catch((error) => {
             this.logger.error(['Error sending to Chatwoot:', error]);
           });
@@ -2561,7 +2596,13 @@ export class BaileysStartupService extends ChannelStartupService {
                 await s3Service.uploadFile(fullName, buffer, size.fileLength?.low, { 'Content-Type': mimetype });
 
                 await this.prismaRepository.media.create({
-                  data: { messageId: msg.id, instanceId: this.instanceId, type: mediaType, fileName: fullName, mimetype },
+                  data: {
+                    messageId: msg.id,
+                    instanceId: this.instanceId,
+                    type: mediaType,
+                    fileName: fullName,
+                    mimetype,
+                  },
                 });
 
                 const mediaUrl = await s3Service.getObjectUrl(fullName);

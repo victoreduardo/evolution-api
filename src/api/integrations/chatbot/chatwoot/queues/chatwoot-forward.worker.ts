@@ -1,10 +1,9 @@
+import { PrismaRepository } from '@api/repository/repository.service';
 import { BullMQConfig, configService } from '@config/env.config';
 import { Logger } from '@config/logger.config';
 import { getBullMQConnection } from '@queues/bullmq-connection';
 import { fromJobSafe } from '@queues/job-serializer';
 import { Job, Worker } from 'bullmq';
-
-import { PrismaRepository } from '@api/repository/repository.service';
 
 import { ChatwootService } from '../services/chatwoot.service';
 import { CHATWOOT_FORWARD_QUEUE_NAME, ChatwootForwardJobData } from './chatwoot-forward.queue';
