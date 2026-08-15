@@ -26,11 +26,16 @@
 
 3. **`sendMessageWithTyping` has non-HTTP callers that expect the real sent-message shape back**, not just controller pass-throughs:
    - `base-chatbot.service.ts:213,220,291` and `typebot.service.ts:328,343,358,485,560` — chatbot flows sending bot replies. These `await` but don't use the return value, so switching to a queued stub doesn't break them *functionally*, but the queue must preserve **per-instance send order** (bot flows send message 1, 2, 3 in sequence — they must still arrive in that order) — see Task 8's per-instance lock.
-   - `chatwoot.service.ts:1663,1688,1948,2032` — Chatwoot agent replies relayed to WhatsApp. These call `waInstance.textMessage/mediaMessage/audioWhatsapp(...)` and **do** use the return value: they call `this.updateChatwootMessageId(...)` with the real `key`/`messageTimestamp` to link the WhatsApp message back to the Chatwoot message record. This breaks under async send unless fixed — see Task 9.
+   - `chatwoot.service.ts` has exactly **two** call sites that need the real sent-message data — not four; `:2032` (`await waInstance?.textMessage(data);`, no `isIntegration` flag, template-auto-reply flow) does **not** link and is out of scope:
+     - **Attachment block, `chatwoot.service.ts:1900-1934`**: either `contactMessage(...)` (`:1906`, contact-card attachments) or `sendAttachment(...)` (`:1918`, which internally calls `mediaMessage`/`audioWhatsapp` at `:1663`/`:1688`) produces `messageSent`, then `updateChatwootMessageId(...)` is called once at `:1923` for both branches.
+     - **Text block, `chatwoot.service.ts:1937-1968`**: `textMessage(data, true)` at `:1948` produces `messageSent`, then `updateChatwootMessageId(...)` is called at `:1957`.
+   - Both blocks already have the link data in scope *before* calling `waInstance`: `{ messageId: body.id, inboxId: body.inbox?.id, conversationId: body.conversation?.id, contactInboxSourceId: body.conversation?.contact_inbox?.source_id }` (`chatwoot.service.ts:1927-1932` and `:1961-1966`) — this is the exact shape of the (currently unexported) `ChatwootMessage` interface at `chatwoot.service.ts:36-42`. Export it and pass it straight through as `chatwootLinkContext` — see Task 9, Step 4.
 
 4. **Existing per-conversation locking in `createConversation`** (`chatwoot.service.ts:703-814`, cache-based lock with 5s poll timeout) already makes concurrent `chatwoot-forward` workers safe for conversation creation — reused as-is, not modified.
 
 5. **`updateChatwootMessageId()` (`chatwoot.service.ts:2043`) needs the `Message` DB row to already exist** — it's a plain `UPDATE ... WHERE "key"->>'id' = ...`, silently a no-op if the row isn't there yet. It only works if called *after* `prismaRepository.message.create(...)` for that send has completed. Today's fire-and-forget `processMessageAsync` (not awaited) already races this for the Chatwoot agent-reply path — Task 9 fixes it by awaiting the persist step before the link update whenever `chatwootLinkContext` is involved, without regressing the fire-and-forget optimization for ordinary sends when the queue is disabled (see Task 9, Step 2).
+
+6. **`updateChatwootMessageId` is `private` today** (`chatwoot.service.ts:2043`) — it's only ever called from within `chatwoot.service.ts` itself. It needs to become `public` since both the `chatwoot-forward` worker (Task 5) and `BaileysStartupService.executeSendMessage` (Task 9) — different classes — need to call it directly.
 
 ---
 
@@ -268,7 +273,7 @@ export type ChatwootForwardJobData = {
   body: unknown; // buffer-safe, run through toJobSafe()
   // present only when this forward originates from a wa-outbound send that needs
   // the Chatwoot message record linked back to the real WhatsApp message afterwards
-  chatwootLinkContext?: { chatwootMessageId: number; chatwootConversationId: number };
+  chatwootLinkContext?: ChatwootMessage;
 };
 
 let queue: Queue<ChatwootForwardJobData> | null = null;
@@ -563,7 +568,7 @@ export function startWaInboundWorker(waMonitor: WAMonitoringService): Worker<WaI
 }
 ```
 
-**Step 3: Confirm the cache accessor.** `baileysCache` is currently a `private readonly` field on `BaileysStartupService` (constructor-injected — check its exact name/visibility with `grep -n "baileysCache" src/api/integrations/channel/whatsapp/whatsapp.baileys.service.ts | head -5`). It needs to be reachable from the worker for the lock. Either widen its visibility to `public readonly baileysCache` or add a small public accessor `public getBaileysCache()`. Use whichever matches the codebase's existing convention (`ChatwootService.getCache()` at `chatwoot.service.ts:109` is the precedent — prefer a `getBaileysCache()` method for consistency).
+**Step 3: Cache accessor — already fine.** `baileysCache` is already `public readonly baileysCache: CacheService` (`whatsapp.baileys.service.ts:236`, constructor-injected) — no visibility change needed. `withInstanceLock` (and `wa-outbound`'s copy, Task 8) reach it directly as `waMonitor.waInstances[instanceName].baileysCache`.
 
 **Step 4: Add `processInboundEvent` and the enqueue dispatch on `BaileysStartupService`.**
 
@@ -643,7 +648,7 @@ export type WaOutboundJobData = {
   message: unknown; // buffer-safe
   options?: unknown;
   isIntegration: boolean;
-  chatwootLinkContext?: { chatwootMessageId: number; chatwootConversationId: number };
+  chatwootLinkContext?: ChatwootMessage;
 };
 
 let queue: Queue<WaOutboundJobData> | null = null;
@@ -671,7 +676,7 @@ export async function enqueueWaOutbound(data: WaOutboundJobData): Promise<{ jobI
 }
 ```
 
-**Worker** — same per-instance lock pattern as `wa-inbound` (Task 7, Step 2/3), reused via the same `getBaileysCache()`/lock helper (extract `withInstanceLock` to a shared file, e.g. `src/queues/instance-lock.ts`, since both `wa-inbound` and `wa-outbound` need it — don't duplicate it):
+**Worker** — same per-instance lock pattern as `wa-inbound` (Task 7, Step 2/3), reused via the same `withInstanceLock` helper (extract it to a shared file, e.g. `src/queues/instance-lock.ts`, since both `wa-inbound` and `wa-outbound` need it — don't duplicate it):
 
 ```typescript
 // wa-outbound.worker.ts
@@ -812,15 +817,57 @@ Add the import:
 import { enqueueWaOutbound, isWaOutboundQueueAvailable } from './queues/wa-outbound.queue';
 ```
 
-**Step 4: Fix the 4 `chatwoot.service.ts` call sites from constraint #3** so they pass `chatwootLinkContext` in and stop depending on the return value for linking:
+**Step 4: Fix the 2 `chatwoot.service.ts` call sites from constraint #3** so they pass `chatwootLinkContext` in and stop depending on the return value for linking. Verified against live code (not just sketched):
 
-- `chatwoot.service.ts:1948` (`textMessage`) and the 3 similar sites (`:1663` audioWhatsapp, `:1688` mediaMessage, `:2032` textMessage) — read each call site's surrounding ~20 lines first (`grep -n -B5 -A15 "waInstance?.textMessage\|waInstance?.mediaMessage\|waInstance?.audioWhatsapp" chatwoot.service.ts`) to find where `chatwootMessageId`/`conversationId` are available in scope at that point, then change the call from e.g.:
-  ```typescript
-  messageSent = await waInstance?.textMessage(data, true);
-  // ...later...
-  await this.updateChatwootMessageId({ ...messageSent, ... }, ...);
-  ```
-  to passing the link context into the DTO/call and deleting the now-redundant `updateChatwootMessageId` call at that site (it happens inside `executeSendMessage` now, Step 2 above). The exact DTO plumbing (`SendTextDto`/`SendMediaDto`/`SendAudioDto` need an optional field, or thread it as a separate parameter — check whether `textMessage(data, isIntegration)` signatures on `BaileysStartupService` can take a 3rd param cleanly) needs to be worked out per call site; this is the part of the plan most likely to need adjustment once you're looking at the live code, since `updateChatwootMessageId`'s exact current signature and these 4 call sites' exact surrounding logic weren't fully traced during planning — budget extra review time here specifically.
+**4a. Export the link-context type.** `chatwoot.service.ts:36-42` has a local, unexported `interface ChatwootMessage { messageId?: number; inboxId?: number; conversationId?: number; contactInboxSourceId?: string; isRead?: boolean; }`. Add `export` to it — this is the real shape (`messageId`/`conversationId`, not `chatwootMessageId`/`chatwootConversationId`) — and use `ChatwootMessage` as the `chatwootLinkContext` type everywhere in this plan (already corrected above and in Tasks 5/8/9's code).
+
+**4b. Make `updateChatwootMessageId` public.** Change `private async updateChatwootMessageId(` to `public async updateChatwootMessageId(` at `chatwoot.service.ts:2043`. No other signature change needed — `(message: MessageModel, chatwootMessageIds: ChatwootMessage, instance: InstanceDto)` is already exactly the shape `executeSendMessage`'s `dispatchChatwootLinkUpdate` (Step 2 above) and the `chatwoot-forward` worker (Task 5) need to call.
+
+**4c. Thread `chatwootLinkContext` through the attachment block** (`chatwoot.service.ts:1900-1934`). Add an optional `chatwootLinkContext?: ChatwootMessage` parameter to `contactMessage(data: SendContactDto, isIntegration = false, chatwootLinkContext?: ChatwootMessage)` on `BaileysStartupService` (`whatsapp.baileys.service.ts:3533`) and forward it into its `sendMessageWithTyping(data.number, { ...message }, {}, isIntegration, chatwootLinkContext)` call. Do the same for `sendAttachment(waInstance, number, media, caption?, options?, chatwootLinkContext?: ChatwootMessage)` in `chatwoot.service.ts:1620`, forwarding it into its internal `waInstance.audioWhatsapp(...)`/`waInstance.mediaMessage(...)` calls (`chatwoot.service.ts:1663,1688`) — those already need a `chatwootLinkContext` parameter added to `audioWhatsapp`/`mediaMessage` on `BaileysStartupService` too, same pattern as `contactMessage`. Then at the call site itself:
+```typescript
+const chatwootLinkContext: ChatwootMessage = {
+  messageId: body.id,
+  inboxId: body.inbox?.id,
+  conversationId: body.conversation?.id,
+  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+};
+
+const messageSent =
+  attachment.file_type === 'contact'
+    ? await waInstance?.contactMessage({ ... } as SendContactDto, true, chatwootLinkContext)
+    : await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options, chatwootLinkContext);
+
+if (!messageSent && body.conversation?.id) {
+  this.onSendMessageError(instance, body.conversation?.id);
+}
+// delete the updateChatwootMessageId(...) call that followed (chatwoot.service.ts:1923-1934) — executeSendMessage does it now
+```
+
+**4d. Thread `chatwootLinkContext` through the text block** (`chatwoot.service.ts:1937-1968`), same pattern:
+```typescript
+const chatwootLinkContext: ChatwootMessage = {
+  messageId: body.id,
+  inboxId: body.inbox?.id,
+  conversationId: body.conversation?.id,
+  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+};
+
+let messageSent: any;
+try {
+  messageSent = await waInstance?.textMessage(data, true, chatwootLinkContext);
+  if (!messageSent) throw new Error('Message not sent');
+  // delete the Long.isLong(...) timestamp fixup and updateChatwootMessageId(...) call that followed
+  // (chatwoot.service.ts:1953-1968) — executeSendMessage does both now
+} catch (error) {
+  if (!messageSent && body.conversation?.id) this.onSendMessageError(instance, body.conversation?.id, error);
+  throw error;
+}
+```
+Add the matching optional param to `textMessage(data: SendTextDto, isIntegration = false, chatwootLinkContext?: ChatwootMessage)` (`whatsapp.baileys.service.ts:2709` — check exact current line after Task 6/7's edits shift things).
+
+**4e. Update `sendMessageWithTyping`'s signature** (Step 3 above) to accept `chatwootLinkContext` as its 5th parameter — already reflected there. Every method touched in 4c/4d just forwards it down to `sendMessageWithTyping`, which forwards it into the job payload (queued) or `executeSendMessage` (inline).
+
+This was the highest-uncertainty part of the plan when first drafted; it's now grounded against the live file (post the Task 6/7/9 baseline). Still worth an extra compile-and-grep pass after implementing, since `mediaMessage`/`audioWhatsapp`/`textMessage` each have their own existing parameter lists that the new optional param must slot into without breaking other callers (`base-chatbot.service.ts`, `typebot.service.ts`, `SendMessageController`) that call them with fewer arguments.
 
 **Step 5:** `npx tsc --noEmit -p tsconfig.json` — expect errors pointing at exactly the callers that need the DTO/param threading from Step 4; fix each.
 
@@ -897,4 +944,4 @@ Commit any fixes found during this pass as their own small commits, not squashed
 - **Not exactly-once.** `wa-outbound` retries can duplicate a real WhatsApp send if the send itself succeeded but a later step (DB write) failed. Bounded by low `ATTEMPTS` default; a proper fix (idempotency key checked before resending) is future work if duplicates show up in practice.
 - **`messaging-history.set` and lifecycle events (QR, connection open/close, contacts-update) stay synchronous**, including the `await this.chatwootService.eventWhatsapp(Events.CONTACTS_UPDATE, ...)` call found at `whatsapp.baileys.service.ts:1527` during history sync. Same blocking pattern, lower priority (backfill, not real-time), same `chatwoot-forward` queue could absorb it later with no redesign.
 - **Per-instance lock adds latency** under high concurrency for a single very active instance (jobs queue up behind the lock instead of running in parallel) — this is the deliberate trade-off for correctness (message order) over raw throughput; if one instance's volume ever needs true parallel processing, that requires a design that tolerates reordering, which chat/unread-count logic currently does not.
-- **`chatwoot.service.ts` call-site threading (Task 9, Step 4) is the highest-uncertainty part of this plan** — the exact DTO/parameter changes needed at those 4 sites weren't fully traced during planning; budget real review time there rather than treating the plan's sketch as final.
+- **`chatwoot.service.ts` call-site threading (Task 9, Step 4)** — grounded against live code during review (2 sites, not 4; exact field names confirmed), but still the part of the plan touching the most call sites across two files (`contactMessage`/`sendAttachment`/`textMessage`/`mediaMessage`/`audioWhatsapp` all need the new optional param) — verify no other caller of those 5 methods breaks after the signature changes.
