@@ -1617,7 +1617,14 @@ export class ChatwootService {
     }
   }
 
-  public async sendAttachment(waInstance: any, number: string, media: any, caption?: string, options?: Options) {
+  public async sendAttachment(
+    waInstance: any,
+    number: string,
+    media: any,
+    caption?: string,
+    options?: Options,
+    chatwootLinkContext?: ChatwootMessage,
+  ) {
     try {
       const parsedMedia = path.parse(decodeURIComponent(media));
       let mimeType = mimeTypes.lookup(parsedMedia?.ext) || '';
@@ -1660,7 +1667,7 @@ export class ChatwootService {
 
         sendTelemetry('/message/sendWhatsAppAudio');
 
-        const messageSent = await waInstance?.audioWhatsapp(data, null, true);
+        const messageSent = await waInstance?.audioWhatsapp(data, null, true, chatwootLinkContext);
 
         return messageSent;
       }
@@ -1685,7 +1692,7 @@ export class ChatwootService {
         data.caption = caption;
       }
 
-      const messageSent = await waInstance?.mediaMessage(data, null, true);
+      const messageSent = await waInstance?.mediaMessage(data, null, true, chatwootLinkContext);
 
       return messageSent;
     } catch (error) {
@@ -1901,6 +1908,13 @@ export class ChatwootService {
                 quoted: await this.getQuotedMessage(body, instance),
               };
 
+              const chatwootLinkContext: ChatwootMessage = {
+                messageId: body.id,
+                inboxId: body.inbox?.id,
+                conversationId: body.conversation?.id,
+                contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+              };
+
               const messageSent =
                 attachment.file_type === 'contact'
                   ? await waInstance?.contactMessage(
@@ -1914,24 +1928,22 @@ export class ChatwootService {
                         ],
                       } as SendContactDto,
                       true,
+                      chatwootLinkContext,
                     )
-                  : await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
+                  : await this.sendAttachment(
+                      waInstance,
+                      chatId,
+                      attachment.data_url,
+                      formatText,
+                      options,
+                      chatwootLinkContext,
+                    );
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id);
               }
-
-              await this.updateChatwootMessageId(
-                {
-                  ...messageSent,
-                },
-                {
-                  messageId: body.id,
-                  inboxId: body.inbox?.id,
-                  conversationId: body.conversation?.id,
-                  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
-                },
-                instance,
-              );
+              // chatwootMessageId linking now happens inside executeSendMessage once the real
+              // send completes (and, when BullMQ is enabled, the DB row exists) - see
+              // whatsapp.baileys.service.ts's dispatchChatwootLinkUpdate.
             }
           } else {
             const data: SendTextDto = {
@@ -1943,29 +1955,22 @@ export class ChatwootService {
 
             sendTelemetry('/message/sendText');
 
+            const chatwootLinkContext: ChatwootMessage = {
+              messageId: body.id,
+              inboxId: body.inbox?.id,
+              conversationId: body.conversation?.id,
+              contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+            };
+
             let messageSent: any;
             try {
-              messageSent = await waInstance?.textMessage(data, true);
+              messageSent = await waInstance?.textMessage(data, true, chatwootLinkContext);
               if (!messageSent) {
                 throw new Error('Message not sent');
               }
-
-              if (Long.isLong(messageSent?.messageTimestamp)) {
-                messageSent.messageTimestamp = messageSent.messageTimestamp?.toNumber();
-              }
-
-              await this.updateChatwootMessageId(
-                {
-                  ...messageSent,
-                },
-                {
-                  messageId: body.id,
-                  inboxId: body.inbox?.id,
-                  conversationId: body.conversation?.id,
-                  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
-                },
-                instance,
-              );
+              // chatwootMessageId linking now happens inside executeSendMessage once the real
+              // send completes (and, when BullMQ is enabled, the DB row exists) - see
+              // whatsapp.baileys.service.ts's dispatchChatwootLinkUpdate.
             } catch (error) {
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id, error);

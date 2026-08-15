@@ -56,6 +56,7 @@ import {
   enqueueChatwootEvent,
   isChatwootForwardQueueAvailable,
 } from '@api/integrations/chatbot/chatwoot/queues/chatwoot-forward.queue';
+import { ChatwootMessage } from '@api/integrations/chatbot/chatwoot/services/chatwoot.service';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
 import * as s3Service from '@api/integrations/storage/s3/libs/minio.server';
 import { ProviderFiles } from '@api/provider/sessions';
@@ -158,6 +159,7 @@ import { v4 } from 'uuid';
 
 import { BaileysMessageProcessor } from './baileysMessage.processor';
 import { enqueueWaInbound, isWaInboundQueueAvailable } from './queues/wa-inbound.queue';
+import { enqueueWaOutbound, isWaOutboundQueueAvailable } from './queues/wa-outbound.queue';
 import { useVoiceCallsBaileys } from './voiceCalls/useVoiceCallsBaileys';
 
 export interface ExtendedIMessageKey extends proto.IMessageKey {
@@ -2317,6 +2319,30 @@ export class BaileysStartupService extends ChannelStartupService {
     message: T,
     options?: Options,
     isIntegration = false,
+    chatwootLinkContext?: ChatwootMessage,
+  ) {
+    if (isWaOutboundQueueAvailable()) {
+      const { jobId } = await enqueueWaOutbound({
+        instanceName: this.instance.name,
+        number,
+        message,
+        options,
+        isIntegration,
+        chatwootLinkContext,
+      });
+      return { jobId, status: 'queued' as const };
+    }
+
+    return this.executeSendMessage(number, message, options, isIntegration, chatwootLinkContext);
+  }
+
+  public async executeSendMessage<T = proto.IMessage>(
+    number: string,
+    message: T,
+    options?: Options,
+    isIntegration = false,
+    chatwootLinkContext?: ChatwootMessage,
+    awaitSideEffects = false,
   ) {
     const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
@@ -2499,10 +2525,21 @@ export class BaileysStartupService extends ChannelStartupService {
       // Send webhook immediately (critical for real-time feedback)
       this.sendDataWebhook(Events.SEND_MESSAGE, messageRaw);
 
-      // Process non-critical operations asynchronously (don't block response)
-      this.processMessageAsync(messageRaw, messageSent, isMedia, isIntegration).catch((error) => {
-        this.logger.error(['Error processing message async:', error]);
-      });
+      // Persist + side effects: awaited when running inside the wa-outbound worker (so BullMQ
+      // retry actually covers persist failures, and so a chatwootLinkContext link update - which
+      // needs the DB row to exist first - happens in the right order); fire-and-forget otherwise,
+      // to keep the synchronous HTTP response fast when the queue is disabled (unchanged from
+      // before this method was split).
+      if (awaitSideEffects || chatwootLinkContext) {
+        const msg = await this.persistSentMessageAndSideEffects(messageRaw, messageSent, isMedia, isIntegration);
+        if (chatwootLinkContext && msg?.id) {
+          await this.dispatchChatwootLinkUpdate(messageRaw, chatwootLinkContext);
+        }
+      } else {
+        this.persistSentMessageAndSideEffects(messageRaw, messageSent, isMedia, isIntegration).catch((error) => {
+          this.logger.error(['Error processing message async:', error]);
+        });
+      }
 
       // Return immediately after sending message and webhook
       return messageRaw;
@@ -2512,30 +2549,38 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
+  private async dispatchChatwootLinkUpdate(messageRaw: any, chatwootLinkContext: ChatwootMessage): Promise<void> {
+    try {
+      await this.chatwootService.updateChatwootMessageId(messageRaw, chatwootLinkContext, {
+        instanceName: this.instance.name,
+        instanceId: this.instanceId,
+      });
+    } catch (error) {
+      this.logger.error(['Failed to link chatwoot message id:', error]);
+    }
+  }
+
   /**
-   * Process non-critical operations asynchronously after message is sent
-   * This method runs in background and doesn't block the response
+   * Persist the sent message and run its non-critical side effects (chatwoot forward, OpenAI
+   * transcription, media upload, chatbot emit). Returns the created Message row (or undefined
+   * if SAVE_DATA.NEW_MESSAGE is off) so callers needing chatwootLinkContext linking can wait
+   * for it specifically.
    */
-  private async processMessageAsync(
+  private async persistSentMessageAndSideEffects(
     messageRaw: any,
     messageSent: any,
     isMedia: boolean,
     isIntegration: boolean,
-  ): Promise<void> {
+  ): Promise<any> {
+    let msg: any;
     try {
       const isVideo = messageSent?.message?.videoMessage;
 
       // 1. Chatwoot integration (non-critical)
       if (this.configService.get<Chatwoot>('CHATWOOT').ENABLED && this.localChatwoot?.enabled && !isIntegration) {
-        this.chatwootService
-          .eventWhatsapp(
-            Events.SEND_MESSAGE,
-            { instanceName: this.instance.name, instanceId: this.instanceId },
-            messageRaw,
-          )
-          .catch((error) => {
-            this.logger.error(['Error sending to Chatwoot:', error]);
-          });
+        await this.dispatchChatwootEvent(Events.SEND_MESSAGE, messageRaw).catch((error) => {
+          this.logger.error(['Error sending to Chatwoot:', error]);
+        });
       }
 
       // 2. OpenAI speech-to-text (non-critical)
@@ -2557,7 +2602,7 @@ export class BaileysStartupService extends ChannelStartupService {
       // 3. Save to database (non-critical for response)
       if (this.configService.get<Database>('DATABASE').SAVE_DATA.NEW_MESSAGE) {
         try {
-          const msg = await this.prismaRepository.message.create({ data: messageRaw });
+          msg = await this.prismaRepository.message.create({ data: messageRaw });
 
           // 4. Upload media to S3/MinIO (non-critical)
           if (isMedia && this.configService.get<S3>('S3').ENABLE) {
@@ -2666,8 +2711,10 @@ export class BaileysStartupService extends ChannelStartupService {
             this.logger.error(['Error emitting chatbot event:', error]);
           });
       }
+
+      return msg;
     } catch (error) {
-      this.logger.error(['Error in processMessageAsync:', error]);
+      this.logger.error(['Error in persistSentMessageAndSideEffects:', error]);
     }
   }
 
@@ -2736,7 +2783,7 @@ export class BaileysStartupService extends ChannelStartupService {
   }
 
   // Send Message Controller
-  public async textMessage(data: SendTextDto, isIntegration = false) {
+  public async textMessage(data: SendTextDto, isIntegration = false, chatwootLinkContext?: ChatwootMessage) {
     const text = data.text;
 
     if (!text || text.trim().length === 0) {
@@ -2755,6 +2802,7 @@ export class BaileysStartupService extends ChannelStartupService {
         mentioned: data?.mentioned,
       },
       isIntegration,
+      chatwootLinkContext,
     );
   }
 
@@ -3088,7 +3136,12 @@ export class BaileysStartupService extends ChannelStartupService {
     return result;
   }
 
-  public async mediaMessage(data: SendMediaDto, file?: any, isIntegration = false) {
+  public async mediaMessage(
+    data: SendMediaDto,
+    file?: any,
+    isIntegration = false,
+    chatwootLinkContext?: ChatwootMessage,
+  ) {
     const mediaData: SendMediaDto = { ...data };
 
     if (file) mediaData.media = file.buffer.toString('base64');
@@ -3106,6 +3159,7 @@ export class BaileysStartupService extends ChannelStartupService {
         mentioned: data?.mentioned,
       },
       isIntegration,
+      chatwootLinkContext,
     );
 
     return mediaSent;
@@ -3313,7 +3367,12 @@ export class BaileysStartupService extends ChannelStartupService {
     }
   }
 
-  public async audioWhatsapp(data: SendAudioDto, file?: any, isIntegration = false) {
+  public async audioWhatsapp(
+    data: SendAudioDto,
+    file?: any,
+    isIntegration = false,
+    chatwootLinkContext?: ChatwootMessage,
+  ) {
     const mediaData: SendAudioDto = { ...data };
 
     if (file?.buffer) {
@@ -3336,6 +3395,7 @@ export class BaileysStartupService extends ChannelStartupService {
           { audio: convert, ptt: true, mimetype: 'audio/ogg; codecs=opus' },
           { presence: 'recording', delay: data?.delay },
           isIntegration,
+          chatwootLinkContext,
         );
 
         return result;
@@ -3353,6 +3413,7 @@ export class BaileysStartupService extends ChannelStartupService {
       },
       { presence: 'recording', delay: data?.delay },
       isIntegration,
+      chatwootLinkContext,
     );
   }
 
@@ -3566,7 +3627,7 @@ export class BaileysStartupService extends ChannelStartupService {
     );
   }
 
-  public async contactMessage(data: SendContactDto, isIntegration = false) {
+  public async contactMessage(data: SendContactDto, isIntegration = false, chatwootLinkContext?: ChatwootMessage) {
     const message: proto.IMessage = {};
 
     const vcard = (contact: ContactMessage) => {
@@ -3604,7 +3665,7 @@ export class BaileysStartupService extends ChannelStartupService {
       };
     }
 
-    return await this.sendMessageWithTyping(data.number, { ...message }, {}, isIntegration);
+    return await this.sendMessageWithTyping(data.number, { ...message }, {}, isIntegration, chatwootLinkContext);
   }
 
   public async reactionMessage(data: SendReactionDto) {
