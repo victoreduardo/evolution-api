@@ -10,6 +10,7 @@ type MountProps = {
 export class BaileysMessageProcessor {
   private processorLogs = new Logger('BaileysMessageProcessor');
   private subscription?: Subscription;
+  private inFlight: Promise<unknown> = Promise.resolve();
 
   protected messageSubject = new Subject<{
     messages: WAMessage[];
@@ -40,8 +41,10 @@ export class BaileysMessageProcessor {
         tap(({ messages }) => {
           this.processorLogs.log(`Processing batch of ${messages.length} messages`);
         }),
-        concatMap(({ messages, type, requestId, settings }) =>
-          from(onMessageReceive({ messages, type, requestId }, settings)).pipe(
+        concatMap(({ messages, type, requestId, settings }) => {
+          const batch = onMessageReceive({ messages, type, requestId }, settings);
+          this.inFlight = batch;
+          return from(batch).pipe(
             retryWhen((errors) =>
               errors.pipe(
                 tap((error) => this.processorLogs.warn(`Retrying message batch due to error: ${error.message}`)),
@@ -49,8 +52,8 @@ export class BaileysMessageProcessor {
                 take(3), // Máximo 3 tentativas
               ),
             ),
-          ),
-        ),
+          );
+        }),
         catchError((error) => {
           this.processorLogs.error(`Error processing message batch: ${error}`);
           return EMPTY;
@@ -68,8 +71,9 @@ export class BaileysMessageProcessor {
     this.messageSubject.next({ messages, type, requestId, settings });
   }
 
-  onDestroy() {
+  async onDestroy() {
     this.subscription?.unsubscribe();
     this.messageSubject.complete();
+    await this.inFlight.catch(() => undefined);
   }
 }

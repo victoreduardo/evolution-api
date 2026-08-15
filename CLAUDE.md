@@ -172,6 +172,10 @@ Critical configurations:
 - `REDIS_ENABLED`: Enable Redis cache
 - `RABBITMQ_ENABLED`/`SQS_ENABLED`: Message queue options
 
+## Observability
+
+- Production logs are queryable via the **Grafana MCP** (Loki datasource). Filter with `service_name = evolution-api`.
+
 ## Development Guidelines
 
 The project follows comprehensive development standards defined in `.cursor/rules/`:

@@ -396,8 +396,8 @@ export class WAMonitoringService {
 
         this.clearDelInstanceTime(instanceName);
 
-        this.cleaningUp(instanceName);
-        this.cleaningStoreData(instanceName);
+        await this.cleaningUp(instanceName);
+        await this.cleaningStoreData(instanceName);
       } finally {
         this.logger.warn(`Instance "${instanceName}" - REMOVED`);
       }
