@@ -33,7 +33,7 @@ export function startWaOutboundWorker(waMonitor: WAMonitoringService): Worker<Wa
         throw new Error(`Instance ${instanceName} not found`);
       }
 
-      await withInstanceLock(instance.baileysCache, 'wa-outbound-lock', instanceName, () =>
+      await withInstanceLock(getBullMQConnection(), 'wa-outbound-lock', instanceName, () =>
         withTimeout(
           instance.executeSendMessage(number, message, options, isIntegration, chatwootLinkContext, true),
           TIMEOUT_MS,

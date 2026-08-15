@@ -25,7 +25,7 @@ export function startWaInboundWorker(waMonitor: WAMonitoringService): Worker<WaI
         return;
       }
 
-      await withInstanceLock(instance.baileysCache, 'wa-inbound-lock', instanceName, () =>
+      await withInstanceLock(getBullMQConnection(), 'wa-inbound-lock', instanceName, () =>
         instance.processInboundEvent(type, payload, settings),
       );
     },
