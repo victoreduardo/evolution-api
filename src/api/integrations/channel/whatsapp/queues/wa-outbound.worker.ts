@@ -4,6 +4,7 @@ import { Logger } from '@config/logger.config';
 import { getBullMQConnection } from '@queues/bullmq-connection';
 import { withInstanceLock } from '@queues/instance-lock';
 import { fromJobSafe } from '@queues/job-serializer';
+import { createJid } from '@utils/createJid';
 import { Job, Worker } from 'bullmq';
 
 import { WA_OUTBOUND_QUEUE_NAME, WaOutboundJobData } from './wa-outbound.queue';
@@ -33,7 +34,9 @@ export function startWaOutboundWorker(waMonitor: WAMonitoringService): Worker<Wa
         throw new Error(`Instance ${instanceName} not found`);
       }
 
-      await withInstanceLock(getBullMQConnection(), 'wa-outbound-lock', instanceName, () =>
+      const conversationKey = `${instanceName}:${createJid(number)}`;
+
+      await withInstanceLock(getBullMQConnection(), 'wa-outbound-lock', conversationKey, () =>
         withTimeout(
           instance.executeSendMessage(
             number,
