@@ -89,6 +89,7 @@ import { fromJobSafe, toJobSafe } from '@queues/job-serializer';
 import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
+import { isWhatsAppCompatibleVideo, resolveMediaMimetype } from '@utils/media-format';
 import { getOnWhatsappCache, saveOnWhatsappCache } from '@utils/onWhatsappCache';
 import { status } from '@utils/renderStatus';
 import { sendTelemetry } from '@utils/sendTelemetry';
@@ -3178,6 +3179,17 @@ export class BaileysStartupService extends ChannelStartupService {
     const mediaData: SendMediaDto = { ...data };
 
     if (file) mediaData.media = file.buffer.toString('base64');
+
+    if (mediaData.mediatype === 'video') {
+      const resolvedMimetype = resolveMediaMimetype(mediaData, isURL);
+      if (!isWhatsAppCompatibleVideo(resolvedMimetype) && resolvedMimetype) {
+        this.logger.warn(
+          `Video mimetype "${resolvedMimetype}" is not playable inline on WhatsApp - sending as document instead`,
+        );
+        mediaData.mediatype = 'document';
+        mediaData.mimetype ??= resolvedMimetype;
+      }
+    }
 
     const generate = await this.prepareMediaMessage(mediaData);
 
