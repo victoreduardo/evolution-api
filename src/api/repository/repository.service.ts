@@ -13,15 +13,15 @@ export class PrismaRepository extends PrismaClient {
   constructor(private readonly configService: ConfigService) {
     const dbConfig = configService.get<import('@config/env.config').Database>('DATABASE');
     const poolConfig = dbConfig.CONNECTION.POOL;
-    
+
     // Build connection URL with pool parameters
     let connectionUri = dbConfig.CONNECTION.URI;
-    
+
     // Add connection pool parameters to URL if not already present
     if (poolConfig) {
       const separator = connectionUri.includes('?') ? '&' : '?';
       const params: string[] = [];
-      
+
       if (poolConfig.MAX_CONNECTIONS && !connectionUri.includes('connection_limit')) {
         params.push(`connection_limit=${poolConfig.MAX_CONNECTIONS}`);
       }
@@ -32,12 +32,12 @@ export class PrismaRepository extends PrismaClient {
         // Prisma uses pool_timeout for connection pool management
         params.push('pool_timeout=20');
       }
-      
+
       if (params.length > 0) {
         connectionUri = `${connectionUri}${separator}${params.join('&')}`;
       }
     }
-    
+
     super({
       datasources: {
         db: {
