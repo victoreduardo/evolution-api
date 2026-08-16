@@ -24,7 +24,11 @@ export function fromJobSafe(value: unknown): any {
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const obj = value as Record<string, unknown>;
     if (typeof obj[BUFFER_MARKER] === 'string' && Object.keys(obj).length === 1) {
-      return new Uint8Array(Buffer.from(obj[BUFFER_MARKER] as string, 'base64'));
+      // Buffer.from(...), not `new Uint8Array(...)`: Buffer *is* a Uint8Array, but some
+      // downstream code (e.g. Baileys' getStream, used when sending raw audio/media buffers)
+      // does a strict Buffer.isBuffer() check and only takes the fast Buffer-shaped path,
+      // otherwise falling through to a `.url`/`.stream` branch and crashing on undefined.
+      return Buffer.from(obj[BUFFER_MARKER] as string, 'base64');
     }
 
     const out: Record<string, unknown> = {};

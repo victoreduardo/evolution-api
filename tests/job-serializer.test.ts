@@ -18,6 +18,16 @@ function run() {
   assert.equal(restored.message.imageMessage.caption, 'oi', 'plain string preserved');
   assert.equal(restored.key.id, 'ABC123', 'plain string preserved');
 
+  // Regression: must reconstruct as a real Buffer, not just a Uint8Array. Baileys' getStream()
+  // does a strict Buffer.isBuffer() check on raw media content (e.g. outbound audio) and falls
+  // through to a `.url`-reading branch that crashes on a plain Uint8Array - caught live sending
+  // a real audio message through the wa-outbound queue.
+  assert.ok(
+    Buffer.isBuffer(restored.message.imageMessage.mediaKey),
+    'mediaKey must be a real Buffer, not just Uint8Array',
+  );
+  assert.ok(Buffer.isBuffer(restored.nested.list[0]), 'array element must be a real Buffer');
+
   // non-object/array/Uint8Array primitives pass through untouched
   assert.equal(fromJobSafe(toJobSafe(null)), null, 'null passes through');
   assert.equal(fromJobSafe(toJobSafe(42)), 42, 'number passes through');
