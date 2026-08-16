@@ -85,6 +85,7 @@ import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import { Boom } from '@hapi/boom';
 import { createId as cuid } from '@paralleldrive/cuid2';
 import { Instance, Message } from '@prisma/client';
+import { fromJobSafe, toJobSafe } from '@queues/job-serializer';
 import { createJid } from '@utils/createJid';
 import { fetchLatestWaWebVersion } from '@utils/fetchLatestWaWebVersion';
 import { makeProxyAgent, makeProxyAgentUndici } from '@utils/makeProxyAgent';
@@ -2364,7 +2365,8 @@ export class BaileysStartupService extends ChannelStartupService {
     // the recipient a second time. idempotencyKey is the BullMQ job id (stable across retries
     // of the same job) - see wa-outbound.worker.ts.
     const idempotencyCacheKey = idempotencyKey ? `wa-outbound-sent:${idempotencyKey}` : null;
-    let messageSent: WAMessage = idempotencyCacheKey ? await this.baileysCache.get(idempotencyCacheKey) : undefined;
+    const cachedSent = idempotencyCacheKey ? await this.baileysCache.get(idempotencyCacheKey) : undefined;
+    let messageSent: WAMessage = cachedSent ? fromJobSafe(cachedSent) : undefined;
 
     if (messageSent) {
       this.logger.verbose(`Skipping duplicate send for idempotency key ${idempotencyKey} - already sent`);
@@ -2520,8 +2522,19 @@ export class BaileysStartupService extends ChannelStartupService {
           );
         }
 
+        if (Long.isLong(messageSent?.messageTimestamp)) {
+          messageSent.messageTimestamp = messageSent.messageTimestamp?.toNumber();
+        }
+
         if (idempotencyCacheKey) {
-          await this.baileysCache.set(idempotencyCacheKey, messageSent, this.WA_OUTBOUND_IDEMPOTENCY_TTL_SECONDS);
+          // RedisCache.set()/get() use plain JSON.stringify/parse (no BufferJSON support), so
+          // any Uint8Array in messageSent (media keys, etc) must be pre-encoded or it corrupts
+          // silently on read-back - reuse the same buffer-safe helper the BullMQ queues use.
+          await this.baileysCache.set(
+            idempotencyCacheKey,
+            toJobSafe(messageSent),
+            this.WA_OUTBOUND_IDEMPOTENCY_TTL_SECONDS,
+          );
         }
       }
 
