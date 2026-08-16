@@ -150,6 +150,15 @@ src/
 - Event types: message.received, message.sent, connection.update, etc.
 - Configurable per instance which events to send
 
+### Internal BullMQ Message Pipeline (opt-in via `BULLMQ_ENABLED`)
+- `wa-inbound`: Baileys `messages.upsert`/`messages.update` processing, decoupled from the per-instance `eventProcessingQueue` (`whatsapp.baileys.service.ts`). This is what fixes multi-minute Chatwoot delivery delays — without it, a slow/unavailable Chatwoot blocks every subsequent WhatsApp event for that instance.
+- `chatwoot-forward`: generic sink for all instance→Chatwoot events (new message, read receipt, delete, edit, send confirmation, agent-reply linking).
+- `wa-outbound`: all outbound sends (HTTP API, chatbot integrations, Chatwoot agent replies) — full async when enabled: the response is a queued job id, not the sent message. Real send confirmation still arrives via the `Events.SEND_MESSAGE` webhook, same as before.
+- All three fall back to today's synchronous/fire-and-forget behavior when `BULLMQ_ENABLED=false` (default) or Redis is unavailable — no hard dependency on this being on.
+- Requires `CACHE_REDIS_ENABLED=true` (reuses the same Redis as caching, via a separate `ioredis` connection — BullMQ doesn't support the `redis` package used elsewhere).
+- Code: `src/queues/` (shared connection, buffer-safe job serializer, per-instance lock) and `*/queues/` under `whatsapp` and `chatwoot`.
+- Design doc: `docs/plans/2026-08-15-bullmq-message-pipeline.md`.
+
 ### Media Handling
 - Local storage or S3/Minio for media files
 - Automatic media download from WhatsApp
@@ -211,6 +220,7 @@ Currently, the project has minimal formal testing infrastructure:
 - **No unit test suite** currently implemented
 - Test files can be placed in `test/` directory as `*.test.ts`
 - Run `npm test` for watch mode development testing
+- **Note:** `/test/` is gitignored at the repo root (inherited from upstream, predates any committed automated test) — anything written there never lands in version control. Place tests that need to actually be committed under `tests/` (plural) instead, run directly with `npx tsx tests/<file>.test.ts` (no framework — plain `node:assert`).
 
 ### Recommended Testing Strategy
 - Focus on **critical business logic** in services

@@ -2,6 +2,7 @@ import { CacheEngine } from '@cache/cacheengine';
 import { Chatwoot, configService, ProviderSession } from '@config/env.config';
 import { eventEmitter } from '@config/event.config';
 import { Logger } from '@config/logger.config';
+import { isBullMQEnabled } from '@queues/bullmq-connection';
 
 import { BusinessController } from './controllers/business.controller';
 import { CallController } from './controllers/call.controller';
@@ -17,8 +18,11 @@ import { ChannelController } from './integrations/channel/channel.controller';
 import { EvolutionController } from './integrations/channel/evolution/evolution.controller';
 import { MetaController } from './integrations/channel/meta/meta.controller';
 import { BaileysController } from './integrations/channel/whatsapp/baileys.controller';
+import { startWaInboundWorker } from './integrations/channel/whatsapp/queues/wa-inbound.worker';
+import { startWaOutboundWorker } from './integrations/channel/whatsapp/queues/wa-outbound.worker';
 import { ChatbotController } from './integrations/chatbot/chatbot.controller';
 import { ChatwootController } from './integrations/chatbot/chatwoot/controllers/chatwoot.controller';
+import { startChatwootForwardWorker } from './integrations/chatbot/chatwoot/queues/chatwoot-forward.worker';
 import { ChatwootService } from './integrations/chatbot/chatwoot/services/chatwoot.service';
 import { DifyController } from './integrations/chatbot/dify/controllers/dify.controller';
 import { DifyService } from './integrations/chatbot/dify/services/dify.service';
@@ -83,6 +87,17 @@ export const proxyController = new ProxyController(proxyService, waMonitor);
 
 const chatwootService = new ChatwootService(waMonitor, configService, prismaRepository, chatwootCache);
 export const chatwootController = new ChatwootController(chatwootService, configService);
+
+if (isBullMQEnabled()) {
+  startChatwootForwardWorker(chatwootService, prismaRepository);
+  startWaInboundWorker(waMonitor);
+  startWaOutboundWorker(waMonitor);
+  logger.info('BullMQ:MessagePipeline - ON (wa-inbound, chatwoot-forward, wa-outbound)');
+} else {
+  logger.info(
+    'BullMQ:MessagePipeline - OFF (BULLMQ_ENABLED=false or CACHE_REDIS_ENABLED=false), using synchronous fallback',
+  );
+}
 
 const settingsService = new SettingsService(waMonitor);
 export const settingsController = new SettingsController(settingsService);

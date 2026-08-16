@@ -1,5 +1,13 @@
 import { InstanceDto } from '@api/dto/instance.dto';
-import { ContactMessage, Options, Quoted, SendAudioDto, SendContactDto, SendMediaDto, SendTextDto } from '@api/dto/sendMessage.dto';
+import {
+  ContactMessage,
+  Options,
+  Quoted,
+  SendAudioDto,
+  SendContactDto,
+  SendMediaDto,
+  SendTextDto,
+} from '@api/dto/sendMessage.dto';
 import { ChatwootDto } from '@api/integrations/chatbot/chatwoot/dto/chatwoot.dto';
 import { postgresClient } from '@api/integrations/chatbot/chatwoot/libs/postgres.client';
 import { chatwootImport } from '@api/integrations/chatbot/chatwoot/utils/chatwoot-import-helper';
@@ -27,13 +35,12 @@ import { WAMessageContent, WAMessageKey } from 'baileys';
 import dayjs from 'dayjs';
 import FormData from 'form-data';
 import { Jimp, JimpMime } from 'jimp';
-import { parsePhoneNumberFromString } from 'libphonenumber-js';
 import Long from 'long';
 import mimeTypes from 'mime-types';
 import path from 'path';
 import { Readable } from 'stream';
 
-interface ChatwootMessage {
+export interface ChatwootMessage {
   messageId?: number;
   inboxId?: number;
   conversationId?: number;
@@ -54,7 +61,7 @@ export class ChatwootService {
     private readonly configService: ConfigService,
     private readonly prismaRepository: PrismaRepository,
     private readonly cache: CacheService,
-  ) { }
+  ) {}
 
   private pgClient = postgresClient.getChatwootConnection();
 
@@ -442,7 +449,7 @@ export class ChatwootService {
             {
               attribute_key: 'identifier',
               filter_operator: 'equal_to',
-              values: [identifier]
+              values: [identifier],
             },
           ],
         },
@@ -762,7 +769,9 @@ export class ChatwootService {
 
         // Check if conversation is resolved and reopenConversation is disabled
         if (conversationExists.status === 'resolved' && !this.provider.reopenConversation) {
-          this.logger.verbose('Conversation is resolved and reopenConversation is disabled, invalidating cache to create new conversation');
+          this.logger.verbose(
+            'Conversation is resolved and reopenConversation is disabled, invalidating cache to create new conversation',
+          );
           this.cache.delete(cacheKey);
           return await this.createConversation(instance, body);
         }
@@ -834,7 +843,9 @@ export class ChatwootService {
           this.logger.verbose(`Processing group conversation`);
           const group = await this.waMonitor.waInstances[instance.instanceName].client.groupMetadata(chatId);
           this.logger.verbose(`Group ${chatId} metadata: ${JSON.stringify(group)}`);
-          const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: chatId });
+          const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({
+            groupJid: chatId,
+          });
           this.logger.verbose(`Group ${chatId} participants: ${JSON.stringify(participants)}`);
           groupParticipants = participants.participants || [];
           nameContact = group.subject;
@@ -921,7 +932,10 @@ export class ChatwootService {
           } else {
             inboxConversation = contactConversations.payload.find(
               (conversation) =>
-                conversation && conversation.status !== 'resolved' && conversation.inbox_id == filterInbox.id && conversation.group === isGroup,
+                conversation &&
+                conversation.status !== 'resolved' &&
+                conversation.inbox_id == filterInbox.id &&
+                conversation.group === isGroup,
             );
             this.logger.verbose(`Found conversation: ${JSON.stringify(inboxConversation)}`);
           }
@@ -932,8 +946,8 @@ export class ChatwootService {
 
             // Sync group participants in background
             if (isGroup && groupParticipants.length > 0) {
-              this.syncGroupParticipants(instance, inboxConversation.id, filterInbox.id, groupParticipants).catch((err) =>
-                this.logger.error(`Error syncing group participants: ${err}`),
+              this.syncGroupParticipants(instance, inboxConversation.id, filterInbox.id, groupParticipants).catch(
+                (err) => this.logger.error(`Error syncing group participants: ${err}`),
               );
             }
 
@@ -950,7 +964,9 @@ export class ChatwootService {
           data['group'] = true;
           data['group_source_id'] = chatId;
           data['group_title'] = nameContact || chatId;
-          this.logger.verbose(`Creating group conversation with group_source_id: ${chatId}, group_title: ${data['group_title']}`);
+          this.logger.verbose(
+            `Creating group conversation with group_source_id: ${chatId}, group_title: ${data['group_title']}`,
+          );
         }
 
         if (this.provider.conversationPending) {
@@ -1120,7 +1136,11 @@ export class ChatwootService {
     }
   }
 
-  public async addGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<any[] | null> {
+  public async addGroupContacts(
+    instance: InstanceDto,
+    conversationId: number,
+    contactIds: number[],
+  ): Promise<any[] | null> {
     try {
       const client = await this.clientCw(instance);
       if (!client) {
@@ -1146,7 +1166,11 @@ export class ChatwootService {
     }
   }
 
-  public async updateGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<any[] | null> {
+  public async updateGroupContacts(
+    instance: InstanceDto,
+    conversationId: number,
+    contactIds: number[],
+  ): Promise<any[] | null> {
     try {
       const client = await this.clientCw(instance);
       if (!client) {
@@ -1164,7 +1188,9 @@ export class ChatwootService {
       const cacheKey = `${instance.instanceName}:groupContacts-${conversationId}`;
       await this.cache.delete(cacheKey);
 
-      this.logger.verbose(`Updated group contacts for conversation ${conversationId} with ${contactIds.length} contacts`);
+      this.logger.verbose(
+        `Updated group contacts for conversation ${conversationId} with ${contactIds.length} contacts`,
+      );
       return response as any[];
     } catch (error) {
       this.logger.error(`Error updating group contacts: ${error}`);
@@ -1172,7 +1198,11 @@ export class ChatwootService {
     }
   }
 
-  public async removeGroupContacts(instance: InstanceDto, conversationId: number, contactIds: number[]): Promise<boolean> {
+  public async removeGroupContacts(
+    instance: InstanceDto,
+    conversationId: number,
+    contactIds: number[],
+  ): Promise<boolean> {
     try {
       const client = await this.clientCw(instance);
       if (!client) {
@@ -1245,7 +1275,9 @@ export class ChatwootService {
         let contact = await this.findContact(instance, participantPhone);
 
         if (!contact) {
-          this.logger.verbose(`Contact not found for phone number: ${participantPhone}, searching by identifier: ${participant.id}`);
+          this.logger.verbose(
+            `Contact not found for phone number: ${participantPhone}, searching by identifier: ${participant.id}`,
+          );
           contact = await this.findContactByIdentifier(instance, participant.id);
         }
 
@@ -1617,7 +1649,14 @@ export class ChatwootService {
     }
   }
 
-  public async sendAttachment(waInstance: any, number: string, media: any, caption?: string, options?: Options) {
+  public async sendAttachment(
+    waInstance: any,
+    number: string,
+    media: any,
+    caption?: string,
+    options?: Options,
+    chatwootLinkContext?: ChatwootMessage,
+  ) {
     try {
       const parsedMedia = path.parse(decodeURIComponent(media));
       let mimeType = mimeTypes.lookup(parsedMedia?.ext) || '';
@@ -1660,7 +1699,7 @@ export class ChatwootService {
 
         sendTelemetry('/message/sendWhatsAppAudio');
 
-        const messageSent = await waInstance?.audioWhatsapp(data, null, true);
+        const messageSent = await waInstance?.audioWhatsapp(data, null, true, chatwootLinkContext);
 
         return messageSent;
       }
@@ -1685,7 +1724,7 @@ export class ChatwootService {
         data.caption = caption;
       }
 
-      const messageSent = await waInstance?.mediaMessage(data, null, true);
+      const messageSent = await waInstance?.mediaMessage(data, null, true, chatwootLinkContext);
 
       return messageSent;
     } catch (error) {
@@ -1764,10 +1803,10 @@ export class ChatwootService {
       // Chatwoot to Whatsapp
       const messageReceived = body.content
         ? body.content
-          .replaceAll(/(?<!\*)\*((?!\s)([^\n*]+?)(?<!\s))\*(?!\*)/g, '_$1_') // Substitui * por _
-          .replaceAll(/\*{2}((?!\s)([^\n*]+?)(?<!\s))\*{2}/g, '*$1*') // Substitui ** por *
-          .replaceAll(/~{2}((?!\s)([^\n*]+?)(?<!\s))~{2}/g, '~$1~') // Substitui ~~ por ~
-          .replaceAll(/(?<!`)`((?!\s)([^`*]+?)(?<!\s))`(?!`)/g, '```$1```') // Substitui ` por ```
+            .replaceAll(/(?<!\*)\*((?!\s)([^\n*]+?)(?<!\s))\*(?!\*)/g, '_$1_') // Substitui * por _
+            .replaceAll(/\*{2}((?!\s)([^\n*]+?)(?<!\s))\*{2}/g, '*$1*') // Substitui ** por *
+            .replaceAll(/~{2}((?!\s)([^\n*]+?)(?<!\s))~{2}/g, '~$1~') // Substitui ~~ por ~
+            .replaceAll(/(?<!`)`((?!\s)([^`*]+?)(?<!\s))`(?!`)/g, '```$1```') // Substitui ` por ```
         : body.content;
 
       const senderName = body?.conversation?.messages[0]?.sender?.available_name || body?.sender?.name;
@@ -1901,6 +1940,13 @@ export class ChatwootService {
                 quoted: await this.getQuotedMessage(body, instance),
               };
 
+              const chatwootLinkContext: ChatwootMessage = {
+                messageId: body.id,
+                inboxId: body.inbox?.id,
+                conversationId: body.conversation?.id,
+                contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+              };
+
               const messageSent =
                 attachment.file_type === 'contact'
                   ? await waInstance?.contactMessage(
@@ -1914,24 +1960,22 @@ export class ChatwootService {
                         ],
                       } as SendContactDto,
                       true,
+                      chatwootLinkContext,
                     )
-                  : await this.sendAttachment(waInstance, chatId, attachment.data_url, formatText, options);
+                  : await this.sendAttachment(
+                      waInstance,
+                      chatId,
+                      attachment.data_url,
+                      formatText,
+                      options,
+                      chatwootLinkContext,
+                    );
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id);
               }
-
-              await this.updateChatwootMessageId(
-                {
-                  ...messageSent,
-                },
-                {
-                  messageId: body.id,
-                  inboxId: body.inbox?.id,
-                  conversationId: body.conversation?.id,
-                  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
-                },
-                instance,
-              );
+              // chatwootMessageId linking now happens inside executeSendMessage once the real
+              // send completes (and, when BullMQ is enabled, the DB row exists) - see
+              // whatsapp.baileys.service.ts's dispatchChatwootLinkUpdate.
             }
           } else {
             const data: SendTextDto = {
@@ -1943,29 +1987,22 @@ export class ChatwootService {
 
             sendTelemetry('/message/sendText');
 
+            const chatwootLinkContext: ChatwootMessage = {
+              messageId: body.id,
+              inboxId: body.inbox?.id,
+              conversationId: body.conversation?.id,
+              contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
+            };
+
             let messageSent: any;
             try {
-              messageSent = await waInstance?.textMessage(data, true);
+              messageSent = await waInstance?.textMessage(data, true, chatwootLinkContext);
               if (!messageSent) {
                 throw new Error('Message not sent');
               }
-
-              if (Long.isLong(messageSent?.messageTimestamp)) {
-                messageSent.messageTimestamp = messageSent.messageTimestamp?.toNumber();
-              }
-
-              await this.updateChatwootMessageId(
-                {
-                  ...messageSent,
-                },
-                {
-                  messageId: body.id,
-                  inboxId: body.inbox?.id,
-                  conversationId: body.conversation?.id,
-                  contactInboxSourceId: body.conversation?.contact_inbox?.source_id,
-                },
-                instance,
-              );
+              // chatwootMessageId linking now happens inside executeSendMessage once the real
+              // send completes (and, when BullMQ is enabled, the DB row exists) - see
+              // whatsapp.baileys.service.ts's dispatchChatwootLinkUpdate.
             } catch (error) {
               if (!messageSent && body.conversation?.id) {
                 this.onSendMessageError(instance, body.conversation?.id, error);
@@ -2040,7 +2077,7 @@ export class ChatwootService {
     }
   }
 
-  private async updateChatwootMessageId(
+  public async updateChatwootMessageId(
     message: MessageModel,
     chatwootMessageIds: ChatwootMessage,
     instance: InstanceDto,
@@ -2596,9 +2633,9 @@ export class ChatwootService {
         const originalMessage = await this.getConversationMessage(body.message);
         let bodyMessage = originalMessage
           ? originalMessage
-            .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
-            .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
-            .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
+              .replaceAll(/\*((?!\s)([^\n*]+?)(?<!\s))\*/g, '**$1**')
+              .replaceAll(/_((?!\s)([^\n_]+?)(?<!\s))_/g, '*$1*')
+              .replaceAll(/~((?!\s)([^\n~]+?)(?<!\s))~/g, '~~$1~~')
           : originalMessage;
 
         // Format mentions if present in the message
@@ -2678,17 +2715,15 @@ export class ChatwootService {
           const fileData = Buffer.from(downloadBase64.base64, 'base64');
 
           const fileStream = new Readable();
-          fileStream._read = () => { };
+          fileStream._read = () => {};
           fileStream.push(fileData);
           fileStream.push(null);
 
           if (body.key.remoteJid.includes('@g.us')) {
-            const participantName = body.pushName;
             const rawPhoneNumber =
               body.key.addressingMode === 'lid' && !body.key.fromMe && body.key.participantAlt
                 ? body.key.participantAlt.split('@')[0].split(':')[0]
                 : body.key.participant.split('@')[0].split(':')[0];
-            const formattedPhoneNumber = parsePhoneNumberFromString(`+${rawPhoneNumber}`).formatInternational();
 
             const content = bodyMessage || '';
 
@@ -2704,10 +2739,14 @@ export class ChatwootService {
                 const groupContacts = await this.getGroupContacts(instance, getConversation);
                 const isParticipantInGroup = groupContacts?.some((c: any) => c.id === participantSenderId);
                 if (!isParticipantInGroup) {
-                  this.logger.verbose(`Adding participant ${participantSenderId} to group conversation ${getConversation}`);
+                  this.logger.verbose(
+                    `Adding participant ${participantSenderId} to group conversation ${getConversation}`,
+                  );
                   await this.addGroupContacts(instance, getConversation, [participantSenderId]);
                 } else {
-                  this.logger.verbose(`Participant ${participantSenderId} already in group conversation ${getConversation}`);
+                  this.logger.verbose(
+                    `Participant ${participantSenderId} already in group conversation ${getConversation}`,
+                  );
                 }
               }
             }
@@ -2845,7 +2884,7 @@ export class ChatwootService {
           const processedBuffer = await img.getBuffer(JimpMime.png);
 
           const fileStream = new Readable();
-          fileStream._read = () => { }; // _read is required but you can noop it
+          fileStream._read = () => {}; // _read is required but you can noop it
           fileStream.push(processedBuffer);
           fileStream.push(null);
 
@@ -2891,8 +2930,14 @@ export class ChatwootService {
             let participantContact = await this.findContact(instance, rawPhoneNumber);
 
             if (!participantContact) {
-              this.logger.verbose(`Participant contact not found for phone number: ${rawPhoneNumber}, searching by identifier: ${body.key.participant}`);
-              const contactJid = body.key.participant.endsWith('@lid') ? body.key.participant : body.key.participantAlt?.endsWith('@lid') ? body.key.participantAlt : null;
+              this.logger.verbose(
+                `Participant contact not found for phone number: ${rawPhoneNumber}, searching by identifier: ${body.key.participant}`,
+              );
+              const contactJid = body.key.participant.endsWith('@lid')
+                ? body.key.participant
+                : body.key.participantAlt?.endsWith('@lid')
+                  ? body.key.participantAlt
+                  : null;
               if (contactJid) {
                 participantContact = await this.findContactByIdentifier(instance, contactJid);
               }
@@ -2903,7 +2948,9 @@ export class ChatwootService {
               this.logger.verbose(`Found participant contact for group text message: ID:${participantSenderId}`);
 
               if (participantContact.name !== rawPhoneNumber) {
-                this.logger.verbose(`Updating participant contact name: ${participantName} - ID:${participantSenderId}`);
+                this.logger.verbose(
+                  `Updating participant contact name: ${participantName} - ID:${participantSenderId}`,
+                );
                 await this.updateContact(instance, participantSenderId, {
                   name: participantName,
                 });
@@ -2913,7 +2960,9 @@ export class ChatwootService {
               const groupContacts = await this.getGroupContacts(instance, getConversation);
               const isParticipantInGroup = groupContacts?.some((c: any) => c.id === participantSenderId);
               if (!isParticipantInGroup) {
-                this.logger.verbose(`Adding participant ${participantSenderId} to group conversation ${getConversation}`);
+                this.logger.verbose(
+                  `Adding participant ${participantSenderId} to group conversation ${getConversation}`,
+                );
                 await this.addGroupContacts(instance, getConversation, [participantSenderId]);
               }
             }
@@ -3138,11 +3187,13 @@ export class ChatwootService {
         if (action === 'add') {
           // Get full group metadata to sync all participants
           try {
-            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: groupId });
+            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({
+              groupJid: groupId,
+            });
             this.logger.verbose(`Group ${groupId} participants: ${JSON.stringify(participants)}`);
             if (participants?.participants?.length > 0) {
-              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch((err) =>
-                this.logger.error(`Error syncing group participants after add: ${err}`),
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch(
+                (err) => this.logger.error(`Error syncing group participants after add: ${err}`),
               );
             }
           } catch (error) {
@@ -3151,15 +3202,17 @@ export class ChatwootService {
         } else if (action === 'remove') {
           // For remove, we also sync to update the group contacts list
           try {
-            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({ groupJid: groupId });
+            const participants = await this.waMonitor.waInstances[instance.instanceName].findParticipants({
+              groupJid: groupId,
+            });
             this.logger.verbose(`Group ${groupId} participants: ${JSON.stringify(participants)}`);
             if (participants?.participants?.length > 0) {
               // Clear the sync cache to force a fresh sync
               const syncCacheKey = `${instance.instanceName}:syncGroupParticipants-${conversationId}`;
               await this.cache.delete(syncCacheKey);
 
-              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch((err) =>
-                this.logger.error(`Error syncing group participants after remove: ${err}`),
+              this.syncGroupParticipants(instance, conversationId, filterInbox.id, participants.participants).catch(
+                (err) => this.logger.error(`Error syncing group participants after remove: ${err}`),
               );
             }
           } catch (error) {
@@ -3205,7 +3258,7 @@ export class ChatwootService {
           const fileData = Buffer.from(body?.qrcode.base64.replace('data:image/png;base64,', ''), 'base64');
 
           const fileStream = new Readable();
-          fileStream._read = () => { };
+          fileStream._read = () => {};
           fileStream.push(fileData);
           fileStream.push(null);
 
