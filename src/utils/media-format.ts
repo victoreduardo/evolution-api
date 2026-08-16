@@ -36,8 +36,14 @@ export function resolveMediaMimetype(media: MediaLike, isUrl: (value: string) =>
   }
 
   if (media.media && isUrl(media.media)) {
-    const byUrl = mimeTypes.lookup(new URL(media.media).pathname);
-    if (byUrl) return byUrl;
+    try {
+      const byUrl = mimeTypes.lookup(new URL(media.media).pathname);
+      if (byUrl) return byUrl;
+    } catch {
+      // isUrl() (class-validator's isURL, require_protocol: false by default) accepts
+      // protocol-less strings like "example.com/video.mov" that the URL constructor rejects
+      // as invalid. Treat that as "no reliable signal" rather than throwing out of a send.
+    }
   }
 
   return null;
