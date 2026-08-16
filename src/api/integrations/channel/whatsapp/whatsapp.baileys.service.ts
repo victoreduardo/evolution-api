@@ -262,6 +262,9 @@ export class BaileysStartupService extends ChannelStartupService {
   // Cache TTL constants (in seconds)
   private readonly MESSAGE_CACHE_TTL_SECONDS = 5 * 60; // 5 minutes - avoid duplicate message processing
   private readonly UPDATE_CACHE_TTL_SECONDS = 30 * 60; // 30 minutes - avoid duplicate status updates
+  // Longer than the worst-case wa-outbound retry window (attempts x backoff x per-attempt
+  // timeout), so a retry can never fail to find the "already sent" marker and duplicate-send.
+  private readonly WA_OUTBOUND_IDEMPOTENCY_TTL_SECONDS = 60 * 60; // 1 hour
 
   public stateConnection: wa.StateConnection = { state: 'close' };
 
@@ -2343,6 +2346,7 @@ export class BaileysStartupService extends ChannelStartupService {
     isIntegration = false,
     chatwootLinkContext?: ChatwootMessage,
     awaitSideEffects = false,
+    idempotencyKey?: string,
   ) {
     const isWA = (await this.whatsappNumber({ numbers: [number] }))?.shift();
 
@@ -2354,155 +2358,171 @@ export class BaileysStartupService extends ChannelStartupService {
 
     this.logger.verbose(`Sending message to ${sender}`);
 
+    // Idempotency guard for wa-outbound retries: BullMQ retries re-run this whole method on
+    // any failure, including one that happens AFTER the real WhatsApp send already succeeded
+    // (DB persist, chatwoot dispatch, etc). Without this, a retry would send the message to
+    // the recipient a second time. idempotencyKey is the BullMQ job id (stable across retries
+    // of the same job) - see wa-outbound.worker.ts.
+    const idempotencyCacheKey = idempotencyKey ? `wa-outbound-sent:${idempotencyKey}` : null;
+    let messageSent: WAMessage = idempotencyCacheKey ? await this.baileysCache.get(idempotencyCacheKey) : undefined;
+
+    if (messageSent) {
+      this.logger.verbose(`Skipping duplicate send for idempotency key ${idempotencyKey} - already sent`);
+    }
+
     try {
-      if (options?.delay) {
-        this.logger.verbose(`Typing for ${options.delay}ms to ${sender}`);
-        if (options.delay > 20000) {
-          let remainingDelay = options.delay;
-          while (remainingDelay > 20000) {
-            await this.client.presenceSubscribe(sender);
+      if (!messageSent) {
+        if (options?.delay) {
+          this.logger.verbose(`Typing for ${options.delay}ms to ${sender}`);
+          if (options.delay > 20000) {
+            let remainingDelay = options.delay;
+            while (remainingDelay > 20000) {
+              await this.client.presenceSubscribe(sender);
 
-            await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
+              await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
 
-            await delay(20000);
+              await delay(20000);
 
-            await this.client.sendPresenceUpdate('paused', sender);
+              await this.client.sendPresenceUpdate('paused', sender);
 
-            remainingDelay -= 20000;
-          }
-          if (remainingDelay > 0) {
-            await this.client.presenceSubscribe(sender);
-
-            await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
-
-            await delay(remainingDelay);
-
-            await this.client.sendPresenceUpdate('paused', sender);
-          }
-        } else {
-          await this.client.presenceSubscribe(sender);
-
-          await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
-
-          await delay(options.delay);
-
-          await this.client.sendPresenceUpdate('paused', sender);
-        }
-      }
-
-      const linkPreview = options?.linkPreview != false ? undefined : false;
-
-      // Parallelize independent operations: quoted message fetch and group metadata
-      let quoted: WAMessage;
-      let group: any = null;
-      const isGroup = isJidGroup(sender);
-
-      // Prepare parallel operations
-      const parallelOps: Promise<any>[] = [];
-
-      // Fetch quoted message if needed
-      if (options?.quoted) {
-        const m = options?.quoted;
-        if (m?.message) {
-          quoted = m;
-        } else {
-          parallelOps.push(
-            this.getMessage(m.key, true)
-              .then((msg) => {
-                quoted = msg as WAMessage;
-              })
-              .catch((error) => {
-                this.logger.warn(['Error fetching quoted message:', error]);
-              }),
-          );
-        }
-      }
-
-      // Fetch group metadata if it's a group
-      if (isGroup) {
-        const cache = this.configService.get<CacheConf>('CACHE');
-        if (!cache.REDIS.ENABLED && !cache.LOCAL.ENABLED) {
-          parallelOps.push(
-            this.findGroup({ groupJid: sender }, 'inner')
-              .then((g) => {
-                group = g;
-              })
-              .catch(() => {
-                throw new NotFoundException('Group not found');
-              }),
-          );
-        } else {
-          parallelOps.push(
-            this.getGroupMetadataCache(sender)
-              .then((g) => {
-                group = g;
-              })
-              .catch(() => {
-                throw new NotFoundException('Group not found');
-              }),
-          );
-        }
-      }
-
-      // Execute parallel operations
-      if (parallelOps.length > 0) {
-        await Promise.all(parallelOps);
-      }
-
-      let messageSent: WAMessage;
-
-      let mentions: string[];
-      let contextInfo: any;
-
-      if (isGroup) {
-        if (!group) {
-          throw new NotFoundException('Group not found');
-        }
-
-        if (options?.mentionsEveryOne) {
-          mentions = group.participants.map((participant) => participant.id);
-        } else if (options?.mentioned?.length) {
-          mentions = options.mentioned.map((mention) => {
-            const jid = createJid(mention);
-            if (isJidGroup(jid)) {
-              return null;
+              remainingDelay -= 20000;
             }
-            return jid;
-          });
+            if (remainingDelay > 0) {
+              await this.client.presenceSubscribe(sender);
+
+              await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
+
+              await delay(remainingDelay);
+
+              await this.client.sendPresenceUpdate('paused', sender);
+            }
+          } else {
+            await this.client.presenceSubscribe(sender);
+
+            await this.client.sendPresenceUpdate((options.presence as WAPresence) ?? 'composing', sender);
+
+            await delay(options.delay);
+
+            await this.client.sendPresenceUpdate('paused', sender);
+          }
         }
 
-        messageSent = await this.sendMessage(
-          sender,
-          message,
-          mentions,
-          linkPreview,
-          quoted,
-          null,
-          group?.ephemeralDuration,
-          // group?.participants,
-        );
-      } else {
-        contextInfo = {
-          mentionedJid: [],
-          groupMentions: [],
-          //expiration: 7776000,
-          ephemeralSettingTimestamp: {
-            low: Math.floor(Date.now() / 1000) - 172800,
-            high: 0,
-            unsigned: false,
-          },
-          disappearingMode: { initiator: 0 },
-        };
-        messageSent = await this.sendMessage(
-          sender,
-          message,
-          mentions,
-          linkPreview,
-          quoted,
-          null,
-          undefined,
-          contextInfo,
-        );
+        const linkPreview = options?.linkPreview != false ? undefined : false;
+
+        // Parallelize independent operations: quoted message fetch and group metadata
+        let quoted: WAMessage;
+        let group: any = null;
+        const isGroup = isJidGroup(sender);
+
+        // Prepare parallel operations
+        const parallelOps: Promise<any>[] = [];
+
+        // Fetch quoted message if needed
+        if (options?.quoted) {
+          const m = options?.quoted;
+          if (m?.message) {
+            quoted = m;
+          } else {
+            parallelOps.push(
+              this.getMessage(m.key, true)
+                .then((msg) => {
+                  quoted = msg as WAMessage;
+                })
+                .catch((error) => {
+                  this.logger.warn(['Error fetching quoted message:', error]);
+                }),
+            );
+          }
+        }
+
+        // Fetch group metadata if it's a group
+        if (isGroup) {
+          const cache = this.configService.get<CacheConf>('CACHE');
+          if (!cache.REDIS.ENABLED && !cache.LOCAL.ENABLED) {
+            parallelOps.push(
+              this.findGroup({ groupJid: sender }, 'inner')
+                .then((g) => {
+                  group = g;
+                })
+                .catch(() => {
+                  throw new NotFoundException('Group not found');
+                }),
+            );
+          } else {
+            parallelOps.push(
+              this.getGroupMetadataCache(sender)
+                .then((g) => {
+                  group = g;
+                })
+                .catch(() => {
+                  throw new NotFoundException('Group not found');
+                }),
+            );
+          }
+        }
+
+        // Execute parallel operations
+        if (parallelOps.length > 0) {
+          await Promise.all(parallelOps);
+        }
+
+        let mentions: string[];
+        let contextInfo: any;
+
+        if (isGroup) {
+          if (!group) {
+            throw new NotFoundException('Group not found');
+          }
+
+          if (options?.mentionsEveryOne) {
+            mentions = group.participants.map((participant) => participant.id);
+          } else if (options?.mentioned?.length) {
+            mentions = options.mentioned.map((mention) => {
+              const jid = createJid(mention);
+              if (isJidGroup(jid)) {
+                return null;
+              }
+              return jid;
+            });
+          }
+
+          messageSent = await this.sendMessage(
+            sender,
+            message,
+            mentions,
+            linkPreview,
+            quoted,
+            null,
+            group?.ephemeralDuration,
+            // group?.participants,
+          );
+        } else {
+          contextInfo = {
+            mentionedJid: [],
+            groupMentions: [],
+            //expiration: 7776000,
+            ephemeralSettingTimestamp: {
+              low: Math.floor(Date.now() / 1000) - 172800,
+              high: 0,
+              unsigned: false,
+            },
+            disappearingMode: { initiator: 0 },
+          };
+          messageSent = await this.sendMessage(
+            sender,
+            message,
+            mentions,
+            linkPreview,
+            quoted,
+            null,
+            undefined,
+            contextInfo,
+          );
+        }
+
+        if (idempotencyCacheKey) {
+          await this.baileysCache.set(idempotencyCacheKey, messageSent, this.WA_OUTBOUND_IDEMPOTENCY_TTL_SECONDS);
+        }
       }
 
       if (Long.isLong(messageSent?.messageTimestamp)) {

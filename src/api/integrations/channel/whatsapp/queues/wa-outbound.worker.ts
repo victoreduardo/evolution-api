@@ -35,7 +35,15 @@ export function startWaOutboundWorker(waMonitor: WAMonitoringService): Worker<Wa
 
       await withInstanceLock(getBullMQConnection(), 'wa-outbound-lock', instanceName, () =>
         withTimeout(
-          instance.executeSendMessage(number, message, options, isIntegration, chatwootLinkContext, true),
+          instance.executeSendMessage(
+            number,
+            message,
+            options,
+            isIntegration,
+            chatwootLinkContext,
+            true,
+            job.id, // idempotency key - stable across retries of this job, prevents duplicate sends
+          ),
           TIMEOUT_MS,
         ),
       );
