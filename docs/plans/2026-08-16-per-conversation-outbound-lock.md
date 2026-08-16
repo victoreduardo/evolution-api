@@ -133,3 +133,22 @@ Add to [2026-08-16-bullmq-pipeline-test-plan.md](2026-08-16-bullmq-pipeline-test
 3. **No cross-contamination:** confirm number A's and number B's messages each land in their own correct Chatwoot conversation, not mixed up — sanity check that the parallel execution path doesn't leak state between concurrent job runs (it shouldn't - `executeSendMessage` doesn't share mutable state across calls beyond what BullMQ/the lock already isolates - but worth eyeballing once live rather than assuming).
 
 Record results (✅/❌ + evidence) inline in this section or in the main test plan doc, whichever is currently being used to track the live verification pass.
+
+#### Results (2026-08-16, against `bullmq-verify` instance, real WhatsApp connection)
+
+| # | Test | Result | Evidence |
+|---|------|--------|----------|
+| 1 | Parallelism across conversations | ✅ | Fired `sendText` to 556381192555 (A) and 556392251001 (B) via `POST /message/sendText/bullmq-verify` back-to-back. Log: both `Sending message to <jid>` lines timestamped in the **same second** (`10:00:56`) — `Number 556392251001 found in cache` → `Sending message to 556392251001@s.whatsapp.net` → `Number 556381192555 found in cache` → `Sending message to 556381192555@s.whatsapp.net`, no serialization gap between the two different-recipient jobs. |
+| 2 | Ordering within one conversation | ✅ | Fired 3 sequential (non-backgrounded) `sendText` calls to 556381192555, content tagged `[order-test2] msg 1/2/3`. Chatwoot `[send.message] New message received` events logged in exact enqueue order: msg 1 → msg 2 → msg 3, each fully processed (start→Chatwoot conversation update) before the next began. (Note: an earlier attempt firing all 3 curls truly concurrently via shell `&` showed processing in a different order than the curl script's line order — expected, since concurrent shell background processes don't guarantee HTTP-arrival order at the server; the lock only guarantees FIFO-by-enqueue, not FIFO-by-shell-invocation. Re-run sequentially to isolate the actual property under test.) |
+| 3 | No cross-contamination | ✅ | Same run as test 1: number A (556381192555) routed to existing Chatwoot conversation ID 22 (`Found conversation to: 556381192555@s.whatsapp.net, conversation ID: 22`); number B (556392251001) got its own new conversation ID 23 (`New conversation created of 556392251001@s.whatsapp.net with ID: 23`). No mixing between the two concurrent job runs. |
+
+Environment note: dev server was restarted mid-verification (from a stale prior-worktree process to the worktree containing this change), which cold-wiped the local Chatwoot dev container's Vite build cache and triggered a one-time multi-minute rebuild — unrelated to this change, just a side effect of the verification setup. Separately, `vite.json`'s `development.autoBuild: true` causes this Chatwoot dev container to rebuild its ~4700-module frontend bundle on every HTML page load (pre-existing container config, unrelated to this repo) — confirmed from container log history showing dozens of rebuild cycles predating this session.
+
+#### Chatwoot UI cross-check (Chrome, logged in as `john@acme.inc`)
+
+Once the dev container's asset rebuild settled, opened the two conversations directly and confirmed visually — not just from server logs:
+
+- **Conversation 23** (`556392251001`, test B): contains `[lock-test B] parallelism check 1`, 10:01 AM — correct contact, correct content.
+- **Conversation 22** (`Victor Eduardo` / `556381192555`, test A): contains, in this exact top-to-bottom (oldest→newest) order: `[lock-test A] parallelism check 1` → `[order-test] msg 3` → `[order-test] msg 2` → `[order-test] msg 1` → `[order-test2] msg 1` → `[order-test2] msg 2` → `[order-test2] msg 3`.
+
+The `order-test` (fired via truly-concurrent backgrounded curls) landing 3→2→1 and `order-test2` (fired sequentially) landing 1→2→3 is visible directly in the Chatwoot thread, matching the server-log analysis exactly — the lock guarantees FIFO-by-enqueue-order, not FIFO-by-client-invocation-order, and once enqueue order is controlled for, ordering holds.
